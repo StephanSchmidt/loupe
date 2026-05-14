@@ -1,0 +1,27 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      # Builds cross-platform binaries + checksums and creates a GitHub release.
+      # Homebrew tap publishing is skipped until the StephanSchmidt/homebrew-tap
+      # repo exists and HOMEBREW_TAP_GITHUB_TOKEN is set as a repo secret —
+      # drop --skip=homebrew once those are in place.
+      - run: go tool goreleaser release --clean --skip=homebrew
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
