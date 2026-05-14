@@ -124,13 +124,28 @@ func loadBaselineOpts(cmd *cobra.Command) (*baselineOpts, bool, error) {
 		return nil, false, err
 	}
 	if !dryRun {
-		gitHostToken, err = ensureToken(gitHostToken, gitHostTokenLabel(cfg.GitHost.Provider))
-		if err != nil {
-			return nil, false, err
-		}
-		trackerToken, err = ensureToken(trackerToken, trackerTokenLabel(cfg.Tracker.Provider))
-		if err != nil {
-			return nil, false, err
+		// When both slots use github, a single PAT covers both — prompt
+		// once and copy the value across. Whichever CI flag was supplied
+		// (if either) seeds ensureToken so no prompt fires in that case.
+		if cfg.GitHost.Provider == config.ProviderGitHub && cfg.Tracker.Provider == config.ProviderGitHub {
+			seed := gitHostToken
+			if seed == "" {
+				seed = trackerToken
+			}
+			tok, err := ensureToken(seed, "GitHub token")
+			if err != nil {
+				return nil, false, err
+			}
+			gitHostToken, trackerToken = tok, tok
+		} else {
+			gitHostToken, err = ensureToken(gitHostToken, gitHostTokenLabel(cfg.GitHost.Provider))
+			if err != nil {
+				return nil, false, err
+			}
+			trackerToken, err = ensureToken(trackerToken, trackerTokenLabel(cfg.Tracker.Provider))
+			if err != nil {
+				return nil, false, err
+			}
 		}
 	}
 	// Both-github convenience: when the git host and tracker are both

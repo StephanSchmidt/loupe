@@ -45,7 +45,7 @@ loupe present     # opens the most recent deck in your browser
 loupe status      # local sqlite summary — no API calls
 ```
 
-`loupe baseline` prompts (echo off) for the Bitbucket app password and Jira API token every invocation. No env vars, no keychain in v0. State is kept locally at `.loupe/state.db`; decks land under `./reports/<timestamp>/index.html`.
+`loupe baseline` prompts (echo off) for the credentials your configured providers need: Bitbucket app password + Jira API token, or a single GitHub PAT when both slots are `github`. No env vars, no keychain in v0. State is kept locally at `.loupe/state.db`; decks land under `./reports/<timestamp>/index.html`.
 
 To analyse a single repo on a github account with 50+ repos, narrow the scope:
 
