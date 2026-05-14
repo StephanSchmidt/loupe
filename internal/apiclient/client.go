@@ -114,9 +114,25 @@ func WithTimeout(d time.Duration) Option {
 	return func(c *Client) { c.timeout = d }
 }
 
+// StatusError carries a non-2xx HTTP response so callers can branch on
+// the status code (e.g. treat 404 / 409 as "missing" rather than fatal)
+// without resorting to string matching on the error message.
+type StatusError struct {
+	StatusCode int
+	Method     string
+	Path       string
+	Body       string
+	Provider   string
+}
+
+func (e *StatusError) Error() string {
+	return fmt.Sprintf("%s %s %s returned %d: %s",
+		e.Provider, e.Method, e.Path, e.StatusCode, e.Body)
+}
+
 // Do executes an HTTP request against baseURL + path + ?rawQuery. The
-// returned response has a non-2xx status surfaced as an error (response
-// body up to 1 KiB is included in the message).
+// returned response has a non-2xx status surfaced as a *StatusError
+// (response body up to 1 KiB is included).
 func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body io.Reader) (*http.Response, error) {
 	base, err := url.Parse(c.baseURL)
 	if err != nil {
@@ -155,8 +171,13 @@ func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body io.
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
 		_ = resp.Body.Close()
-		return nil, fmt.Errorf("%s %s %s returned %d: %s",
-			c.displayName(), method, path, resp.StatusCode, string(respBody))
+		return nil, &StatusError{
+			StatusCode: resp.StatusCode,
+			Method:     method,
+			Path:       path,
+			Body:       string(respBody),
+			Provider:   c.displayName(),
+		}
 	}
 	return resp, nil
 }

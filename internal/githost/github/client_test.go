@@ -247,7 +247,7 @@ func TestListPullRequests_StateMapping(t *testing.T) {
 				"created_at": "2026-05-07T10:00:00Z", "updated_at": "2026-05-09T10:00:00Z",
 				"closed_at": closed.Format(time.RFC3339),
 				"head":      map[string]string{"ref": "nope"}, "base": map[string]string{"ref": "main"},
-				"user":      map[string]string{"login": "carol"}},
+				"user": map[string]string{"login": "carol"}},
 		})
 	})
 
@@ -299,6 +299,31 @@ func TestListPullRequests_StopsBeforeSince(t *testing.T) {
 	}
 	if len(got) != 1 || got[0] != "10" {
 		t.Errorf("got %v, want [10] (older PR should be skipped)", got)
+	}
+}
+
+func TestListCommits_EmptyRepoReturns409Gracefully(t *testing.T) {
+	f := newFake(t)
+	f.route("GET", "/repos/acme/empty/commits", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"Git Repository is empty.","status":"409"}`))
+	})
+
+	c := newClient(t, f.srv.URL)
+	var commits []githost.Commit
+	var streamErr error
+	for cmt, err := range c.ListCommits(context.Background(), githost.RepoRef{Workspace: "acme", Slug: "empty"}, time.Time{}) {
+		if err != nil {
+			streamErr = err
+			break
+		}
+		commits = append(commits, cmt)
+	}
+	if streamErr != nil {
+		t.Errorf("expected 409 to be swallowed, got error: %v", streamErr)
+	}
+	if len(commits) != 0 {
+		t.Errorf("expected zero commits, got %d", len(commits))
 	}
 }
 

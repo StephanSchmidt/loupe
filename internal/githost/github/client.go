@@ -7,8 +7,10 @@ package github
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -250,6 +252,10 @@ func repoFromWire(r wireRepo) githost.Repo {
 // ListCommits streams commits in reverse-chronological order. With a
 // non-zero since, GitHub's `since` query parameter bounds the result
 // server-side; pagination continues until the API runs out of pages.
+//
+// Empty repositories (initialised but with no default branch) return 409
+// Conflict from /commits — that's not an error condition for loupe, so
+// we treat it as "no commits" and let the rest of the pipeline proceed.
 func (c *Client) ListCommits(ctx context.Context, repo githost.RepoRef, since time.Time) iter.Seq2[githost.Commit, error] {
 	return func(yield func(githost.Commit, error) bool) {
 		next := fmt.Sprintf("/repos/%s/%s/commits",
@@ -263,6 +269,9 @@ func (c *Client) ListCommits(ctx context.Context, repo githost.RepoRef, since ti
 			var page []wireCommit
 			nextURL, err := c.getPage(ctx, next, rawQuery, &page)
 			if err != nil {
+				if isEmptyRepoError(err) {
+					return
+				}
 				yield(githost.Commit{}, fmt.Errorf("list commits %s/%s: %w", repo.Workspace, repo.Slug, err))
 				return
 			}
@@ -274,6 +283,15 @@ func (c *Client) ListCommits(ctx context.Context, repo githost.RepoRef, since ti
 			next, rawQuery = splitNextURL(nextURL)
 		}
 	}
+}
+
+// isEmptyRepoError reports whether err comes from GitHub's documented
+// 409 response on /commits for a repository with no default branch.
+// The 409 only fires on the commits endpoint — /pulls and /issues
+// return 200 [] for empty repos, so we don't generalise this check.
+func isEmptyRepoError(err error) bool {
+	var se *apiclient.StatusError
+	return errors.As(err, &se) && se.StatusCode == http.StatusConflict
 }
 
 func commitFromWire(raw wireCommit) githost.Commit {
