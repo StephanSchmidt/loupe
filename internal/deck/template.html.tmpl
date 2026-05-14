@@ -23,10 +23,13 @@
   .reveal .big-number-grid > div { text-align: center; max-width: 280px; }
   .reveal .footnote { font-size: 0.55em; color: #666; margin-top: 1em; }
   .reveal .caveats { font-size: 0.7em; }
+  /* Fixed dimensions in reveal's logical-slide coords (default 960x700);
+     reveal scales the whole slide via transform, so percentages or vh
+     here would fight with the scale and ECharts would measure wrong. */
   .reveal .chart {
-    width: 90%;
-    height: 70vh;
-    margin: 0 auto;
+    width: 880px;
+    height: 480px;
+    margin: 20px auto 0;
   }
 </style>
 </head>
@@ -116,10 +119,33 @@
   const throughputOption = {{ .Charts.ThroughputJSON }};
   const adoptionOption = {{ .Charts.AdoptionJSON }};
 
-  // Initialise reveal first. reveal hides slides via display:none, so
-  // ECharts measures 0x0 on hidden containers — we re-size each chart on
-  // every slidechanged event so it lays out correctly when its slide
-  // becomes visible.
+  // Reveal hides non-current slides with display:none. Initialising an
+  // ECharts instance on a hidden container locks it to 0×0 and resize()
+  // doesn't always recover; instead we lazy-init each chart the first
+  // time its slide becomes visible, by which point the container has
+  // real pixel dimensions. <section data-chart="..."> is the
+  // discriminator; the script doesn't hard-code chart IDs.
+  const chartOptions = {
+    throughput: throughputOption,
+    adoption: adoptionOption,
+  };
+  const chartInstances = {};
+
+  function showChartFor(slide) {
+    if (!slide) return;
+    const kind = slide.dataset && slide.dataset.chart;
+    if (!kind || !chartOptions[kind]) return;
+    const div = slide.querySelector('.chart');
+    if (!div) return;
+    let instance = chartInstances[kind];
+    if (!instance) {
+      instance = echarts.init(div);
+      instance.setOption(chartOptions[kind]);
+      chartInstances[kind] = instance;
+    }
+    instance.resize();
+  }
+
   Reveal.initialize({
     hash: true,
     controls: true,
@@ -127,16 +153,13 @@
     slideNumber: 'c/t',
     transition: 'fade'
   }).then(function () {
-    const throughput = echarts.init(document.getElementById('throughput-chart'));
-    throughput.setOption(throughputOption);
-    const adoption = echarts.init(document.getElementById('adoption-chart'));
-    adoption.setOption(adoptionOption);
-
-    function resizeAll() { throughput.resize(); adoption.resize(); }
-    Reveal.on('slidechanged', resizeAll);
-    window.addEventListener('resize', resizeAll);
-    // Initial sizing for whichever slide is current.
-    setTimeout(resizeAll, 0);
+    Reveal.on('slidechanged', function (e) { showChartFor(e.currentSlide); });
+    // If the deck is opened on a chart slide (e.g. via #/3), the first
+    // slidechanged event won't fire — handle the initial slide explicitly.
+    showChartFor(Reveal.getCurrentSlide());
+    window.addEventListener('resize', function () {
+      for (const k in chartInstances) chartInstances[k].resize();
+    });
   });
 </script>
 </body>
