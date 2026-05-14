@@ -11,10 +11,10 @@ The full design brief lives in [`loupe-brief.md`](loupe-brief.md).
 **v0 — usable for an honest baseline, not yet feature-complete.**
 
 Working:
-- Bitbucket Cloud + Jira Cloud ingestion behind `githost.GitHost` / `tracker.Tracker` interfaces
+- Bitbucket Cloud and GitHub for git, Jira Cloud and GitHub Issues for tracking — all behind `githost.GitHost` / `tracker.Tracker` interfaces (GitHub Enterprise Server not yet supported)
 - Co-Authored-By trailer detection (Claude, Aider, Copilot, Cursor)
 - ISO-week aggregates plus automatic AI-adoption cutover detection (config override supported)
-- reveal.js deck with weekly throughput (human vs AI) and adoption % charts
+- reveal.js deck with weekly throughput (human vs AI) and adoption % charts, plus PNG/SVG exports under `reports/<run>/charts/`
 
 Not yet:
 - `loupe run` (weekly incremental) — stub
@@ -22,7 +22,7 @@ Not yet:
 - End-to-end cycle time (ticket → merged) — the headline chart from the brief
 - Per-team breakdown, quality counterweight (defects, churn)
 - Squash-merge trailer recovery via PR-commit lookup
-- GitLab / GitHub / Linear providers — one package + one switch case each
+- GitLab / Linear providers, GitHub Enterprise Server — one package + one switch case each
 
 ## Install
 
@@ -86,6 +86,20 @@ output:
 ```
 
 Every workspace and Jira project the credentials can see is indexed automatically — no include/exclude lists in v0.
+
+To use GitHub instead, set both providers to `github` and supply a personal access token at prompt time:
+
+```yaml
+git_host:
+  provider: github
+  # base_url and username are optional; defaults to api.github.com / authed user
+
+tracker:
+  provider: github
+  # base_url is optional; defaults to api.github.com
+```
+
+Loupe will enumerate the authed user's own repos plus every org they belong to, and treat each repo with Issues enabled as a tracker project.
 
 ## Methodology
 

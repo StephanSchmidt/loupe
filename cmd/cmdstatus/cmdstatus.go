@@ -177,6 +177,8 @@ func displayName(provider string) string {
 		return "Bitbucket"
 	case "jira-cloud":
 		return "Jira"
+	case "github":
+		return "GitHub"
 	default:
 		return provider
 	}

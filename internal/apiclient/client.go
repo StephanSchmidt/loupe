@@ -38,6 +38,15 @@ func BasicAuth(user, password string) AuthFunc {
 	return func(req *http.Request) { req.SetBasicAuth(user, password) }
 }
 
+// BearerToken sets Authorization: Bearer <token> on every request. Used by
+// GitHub-style APIs where a PAT or fine-grained token authenticates without
+// a username pair.
+func BearerToken(token string) AuthFunc {
+	return func(req *http.Request) {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
 // NoAuth applies nothing — useful for tests that hit local httptest servers.
 func NoAuth() AuthFunc { return func(*http.Request) {} }
 

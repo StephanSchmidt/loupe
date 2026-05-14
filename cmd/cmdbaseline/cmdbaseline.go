@@ -16,9 +16,11 @@ import (
 	"github.com/StephanSchmidt/loupe/internal/deck"
 	"github.com/StephanSchmidt/loupe/internal/githost"
 	"github.com/StephanSchmidt/loupe/internal/githost/bitbucket"
+	ghHost "github.com/StephanSchmidt/loupe/internal/githost/github"
 	"github.com/StephanSchmidt/loupe/internal/ingest"
 	"github.com/StephanSchmidt/loupe/internal/store"
 	"github.com/StephanSchmidt/loupe/internal/tracker"
+	ghTracker "github.com/StephanSchmidt/loupe/internal/tracker/github"
 	"github.com/StephanSchmidt/loupe/internal/tracker/jira"
 )
 
@@ -28,11 +30,13 @@ const (
 )
 
 // Hidden flag names — used by smoke tests / CI; not advertised in `--help`.
+// They're provider-neutral because the configured provider determines
+// which credentials are expected.
 const (
-	flagBitbucketToken   = "bitbucket-token"
-	flagJiraToken        = "jira-token"
-	flagBitbucketBaseURL = "bitbucket-base-url"
-	flagJiraBaseURL      = "jira-base-url"
+	flagGitHostToken   = "git-host-token"
+	flagTrackerToken   = "tracker-token"
+	flagGitHostBaseURL = "git-host-base-url"
+	flagTrackerBaseURL = "tracker-base-url"
 )
 
 func BuildBaselineCmd() *cobra.Command {
@@ -52,11 +56,11 @@ Tokens are prompted (echo off) every invocation — no env vars in v0.`,
 	cmd.Flags().Bool("dry-run", false, "validate config without writing state")
 
 	// Hidden test-only flags. Documented surface stays "every invocation prompts".
-	cmd.Flags().String(flagBitbucketToken, "", "")
-	cmd.Flags().String(flagJiraToken, "", "")
-	cmd.Flags().String(flagBitbucketBaseURL, "", "")
-	cmd.Flags().String(flagJiraBaseURL, "", "")
-	for _, f := range []string{flagBitbucketToken, flagJiraToken, flagBitbucketBaseURL, flagJiraBaseURL} {
+	cmd.Flags().String(flagGitHostToken, "", "")
+	cmd.Flags().String(flagTrackerToken, "", "")
+	cmd.Flags().String(flagGitHostBaseURL, "", "")
+	cmd.Flags().String(flagTrackerBaseURL, "", "")
+	for _, f := range []string{flagGitHostToken, flagTrackerToken, flagGitHostBaseURL, flagTrackerBaseURL} {
 		_ = cmd.Flags().MarkHidden(f)
 	}
 
@@ -64,13 +68,13 @@ Tokens are prompted (echo off) every invocation — no env vars in v0.`,
 }
 
 type baselineOpts struct {
-	cfg         *config.Config
-	override    time.Time
-	bbToken     string
-	jiraToken   string
-	bbBaseURL   string
-	jiraBaseURL string
-	out         io.Writer
+	cfg            *config.Config
+	override       time.Time
+	gitHostToken   string
+	trackerToken   string
+	gitHostBaseURL string
+	trackerBaseURL string
+	out            io.Writer
 }
 
 func runBaseline(cmd *cobra.Command, args []string) error {
@@ -82,11 +86,11 @@ func runBaseline(cmd *cobra.Command, args []string) error {
 		_, _ = fmt.Fprintln(opts.out, "config valid; --dry-run set, not writing state")
 		return nil
 	}
-	gh, err := buildGitHost(opts.cfg, opts.bbToken, opts.bbBaseURL)
+	gh, err := buildGitHost(opts.cfg, opts.gitHostToken, opts.gitHostBaseURL)
 	if err != nil {
 		return err
 	}
-	trk, err := buildTracker(opts.cfg, opts.jiraToken, opts.jiraBaseURL)
+	trk, err := buildTracker(opts.cfg, opts.trackerToken, opts.trackerBaseURL)
 	if err != nil {
 		return err
 	}
@@ -100,10 +104,10 @@ func loadBaselineOpts(cmd *cobra.Command) (*baselineOpts, bool, error) {
 	configPath, _ := cmd.Flags().GetString("config")
 	cutoverFlag, _ := cmd.Flags().GetString("cutover-date")
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
-	bbToken, _ := cmd.Flags().GetString(flagBitbucketToken)
-	jiraToken, _ := cmd.Flags().GetString(flagJiraToken)
-	bbBaseURL, _ := cmd.Flags().GetString(flagBitbucketBaseURL)
-	jiraBaseURL, _ := cmd.Flags().GetString(flagJiraBaseURL)
+	gitHostToken, _ := cmd.Flags().GetString(flagGitHostToken)
+	trackerToken, _ := cmd.Flags().GetString(flagTrackerToken)
+	gitHostBaseURL, _ := cmd.Flags().GetString(flagGitHostBaseURL)
+	trackerBaseURL, _ := cmd.Flags().GetString(flagTrackerBaseURL)
 
 	cfg, err := config.Load(configPath)
 	if err != nil {
@@ -114,21 +118,46 @@ func loadBaselineOpts(cmd *cobra.Command) (*baselineOpts, bool, error) {
 		return nil, false, err
 	}
 	if !dryRun {
-		bbToken, err = ensureToken(bbToken, "Bitbucket app password")
+		gitHostToken, err = ensureToken(gitHostToken, gitHostTokenLabel(cfg.GitHost.Provider))
 		if err != nil {
 			return nil, false, err
 		}
-		jiraToken, err = ensureToken(jiraToken, "Jira API token")
+		trackerToken, err = ensureToken(trackerToken, trackerTokenLabel(cfg.Tracker.Provider))
 		if err != nil {
 			return nil, false, err
 		}
 	}
 	return &baselineOpts{
 		cfg: cfg, override: override,
-		bbToken: bbToken, jiraToken: jiraToken,
-		bbBaseURL: bbBaseURL, jiraBaseURL: jiraBaseURL,
+		gitHostToken: gitHostToken, trackerToken: trackerToken,
+		gitHostBaseURL: gitHostBaseURL, trackerBaseURL: trackerBaseURL,
 		out: cmd.OutOrStdout(),
 	}, dryRun, nil
+}
+
+// gitHostTokenLabel / trackerTokenLabel return the interactive-prompt
+// label for the configured provider. Centralising this keeps the prompt
+// wording consistent and makes adding a third provider a one-line change.
+func gitHostTokenLabel(provider string) string {
+	switch provider {
+	case config.ProviderBitbucketCloud:
+		return "Bitbucket app password"
+	case config.ProviderGitHub:
+		return "GitHub token (git host)"
+	default:
+		return "git host token"
+	}
+}
+
+func trackerTokenLabel(provider string) string {
+	switch provider {
+	case config.ProviderJiraCloud:
+		return "Jira API token"
+	case config.ProviderGitHub:
+		return "GitHub token (tracker)"
+	default:
+		return "tracker token"
+	}
 }
 
 func runPipeline(ctx context.Context, opts *baselineOpts, gh githost.GitHost, trk tracker.Tracker) error {
@@ -230,13 +259,15 @@ func ensureToken(existing, label string) (string, error) {
 // buildGitHost is the explicit registry for git-host providers. Adding a
 // case (e.g. ProviderGitLabCloud) is the full plug-in surface.
 func buildGitHost(cfg *config.Config, token, baseURLOverride string) (githost.GitHost, error) {
+	base := cfg.GitHost.BaseURL
+	if baseURLOverride != "" {
+		base = baseURLOverride
+	}
 	switch cfg.GitHost.Provider {
 	case config.ProviderBitbucketCloud:
-		base := cfg.GitHost.BaseURL
-		if baseURLOverride != "" {
-			base = baseURLOverride
-		}
 		return bitbucket.New(base, cfg.GitHost.Username, token)
+	case config.ProviderGitHub:
+		return ghHost.New(base, token)
 	default:
 		return nil, fmt.Errorf("unsupported git_host.provider %q", cfg.GitHost.Provider)
 	}
@@ -248,7 +279,16 @@ func buildTracker(cfg *config.Config, token, baseURLOverride string) (tracker.Tr
 		if baseURLOverride != "" {
 			return jira.NewWithBaseURL(baseURLOverride, cfg.Tracker.Email, token)
 		}
+		if cfg.Tracker.BaseURL != "" {
+			return jira.NewWithBaseURL(cfg.Tracker.BaseURL, cfg.Tracker.Email, token)
+		}
 		return jira.New(cfg.Tracker.Site, cfg.Tracker.Email, token)
+	case config.ProviderGitHub:
+		base := cfg.Tracker.BaseURL
+		if baseURLOverride != "" {
+			base = baseURLOverride
+		}
+		return ghTracker.New(base, token)
 	default:
 		return nil, fmt.Errorf("unsupported tracker.provider %q", cfg.Tracker.Provider)
 	}

@@ -49,6 +49,29 @@ func writeConfig(t *testing.T, body string) string {
 	return path
 }
 
+func TestLoad_GitHubProviderDefaultsBaseURLs(t *testing.T) {
+	body := `
+org: acme-eng
+
+git_host:
+  provider: github
+
+tracker:
+  provider: github
+`
+	path := writeConfig(t, body)
+	c, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if c.GitHost.BaseURL != "https://api.github.com" {
+		t.Errorf("git_host.base_url = %q, want default https://api.github.com", c.GitHost.BaseURL)
+	}
+	if c.Tracker.BaseURL != "https://api.github.com" {
+		t.Errorf("tracker.base_url = %q, want default https://api.github.com", c.Tracker.BaseURL)
+	}
+}
+
 func TestLoad_FullConfigRoundtrip(t *testing.T) {
 	path := writeConfig(t, fullYAML)
 	c, err := Load(path)

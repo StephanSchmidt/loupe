@@ -50,10 +50,10 @@ func run() error {
 	fmt.Println("==> Running loupe baseline")
 	if out, err := runCmd(workDir, loupeBin, "baseline",
 		"--config", cfgPath,
-		"--bitbucket-token", "fake-bb",
-		"--jira-token", "fake-jira",
-		"--bitbucket-base-url", srv.URL,
-		"--jira-base-url", srv.URL,
+		"--git-host-token", "fake-bb",
+		"--tracker-token", "fake-jira",
+		"--git-host-base-url", srv.URL,
+		"--tracker-base-url", srv.URL,
 	); err != nil {
 		return fmt.Errorf("baseline failed:\n%s\n%w", out, err)
 	} else {

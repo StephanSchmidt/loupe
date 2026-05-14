@@ -15,19 +15,22 @@ const (
 	defaultComparisonWeeks              = 12
 	defaultOutputPath                   = "./reports"
 	defaultBitbucketBaseURL             = "https://api.bitbucket.org/2.0"
+	defaultGitHubBaseURL                = "https://api.github.com"
 
 	ProviderBitbucketCloud = "bitbucket-cloud"
 	ProviderJiraCloud      = "jira-cloud"
+	ProviderGitHub         = "github"
 )
 
 // supportedGitHostProviders lists every provider string accepted in
 // git_host.provider. Adding GitLab here + a case in the registry
 // (cmd/cmdbaseline.buildGitHost) is the full plug-in surface.
-var supportedGitHostProviders = []string{ProviderBitbucketCloud}
+var supportedGitHostProviders = []string{ProviderBitbucketCloud, ProviderGitHub}
 
 // supportedTrackerProviders lists every provider string accepted in
-// tracker.provider.
-var supportedTrackerProviders = []string{ProviderJiraCloud}
+// tracker.provider. GitHub can play either role: as a tracker it ingests
+// issues from the same repos that the git host enumerates.
+var supportedTrackerProviders = []string{ProviderJiraCloud, ProviderGitHub}
 
 type Config struct {
 	Org        string           `yaml:"org"`
@@ -48,10 +51,13 @@ type GitHostConfig struct {
 }
 
 // TrackerConfig holds non-secret coordinates for the issue tracker.
+// Site/Email are Jira-specific; BaseURL is used by GitHub (and lets Jira
+// callers override the composed URL for tests).
 type TrackerConfig struct {
 	Provider string `yaml:"provider"`
-	Site     string `yaml:"site"`
-	Email    string `yaml:"email"`
+	Site     string `yaml:"site,omitempty"`
+	Email    string `yaml:"email,omitempty"`
+	BaseURL  string `yaml:"base_url,omitempty"`
 }
 
 type TeamConfig struct {
@@ -111,6 +117,12 @@ func (c *Config) applyDefaults() {
 	if c.GitHost.Provider == ProviderBitbucketCloud && c.GitHost.BaseURL == "" {
 		c.GitHost.BaseURL = defaultBitbucketBaseURL
 	}
+	if c.GitHost.Provider == ProviderGitHub && c.GitHost.BaseURL == "" {
+		c.GitHost.BaseURL = defaultGitHubBaseURL
+	}
+	if c.Tracker.Provider == ProviderGitHub && c.Tracker.BaseURL == "" {
+		c.Tracker.BaseURL = defaultGitHubBaseURL
+	}
 }
 
 func (c *Config) Validate() error {
@@ -126,6 +138,9 @@ func (c *Config) Validate() error {
 		if c.GitHost.Username == "" {
 			errs = append(errs, "git_host.username is required for bitbucket-cloud")
 		}
+	case ProviderGitHub:
+		// No required fields beyond Provider — the authed user's login is
+		// fetched at runtime via /user.
 	default:
 		errs = append(errs, fmt.Sprintf("git_host.provider %q is not supported (allowed: %s)",
 			c.GitHost.Provider, strings.Join(supportedGitHostProviders, ", ")))
@@ -141,6 +156,8 @@ func (c *Config) Validate() error {
 		if c.Tracker.Email == "" {
 			errs = append(errs, "tracker.email is required for jira-cloud")
 		}
+	case ProviderGitHub:
+		// No required fields beyond Provider.
 	default:
 		errs = append(errs, fmt.Sprintf("tracker.provider %q is not supported (allowed: %s)",
 			c.Tracker.Provider, strings.Join(supportedTrackerProviders, ", ")))
