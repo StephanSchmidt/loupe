@@ -1,5 +1,7 @@
 # Loupe
 
+<p align="center"><img src="logo.svg" alt="Loupe" width="420"></p>
+
 Diagnostic CLI that measures the impact of AI coding assistants on engineering teams. Indexes Bitbucket Cloud and Jira Cloud via REST APIs, detects AI-assisted commits, and renders a reveal.js slide deck a CTO can present in their next exec meeting.
 
 Not an analytics platform. Closer in shape to `lighthouse` or `npm audit` — run once for a baseline, run weekly to track impact. No SaaS, no login, no data leaves your environment.
