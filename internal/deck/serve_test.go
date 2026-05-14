@@ -7,12 +7,33 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
 
 	"github.com/StephanSchmidt/loupe/internal/browser"
 )
+
+// syncBuffer is a bytes.Buffer guarded by a mutex so the test goroutine can
+// poll String() while Serve is still writing status lines from its own
+// goroutine. bytes.Buffer alone is not safe for concurrent read/write.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 func TestFindLatestRun(t *testing.T) {
 	dir := t.TempDir()
@@ -76,7 +97,7 @@ func TestServe_ServesIndexAndStopsOnSignal(t *testing.T) {
 		t.Fatalf("write index: %v", err)
 	}
 
-	var statusBuf bytes.Buffer
+	var statusBuf syncBuffer
 
 	done := make(chan error, 1)
 	go func() {
