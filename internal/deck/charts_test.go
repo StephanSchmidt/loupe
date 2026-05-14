@@ -74,8 +74,14 @@ func TestBuildChartPayload_ThroughputShape(t *testing.T) {
 	if ai["name"] != "AI-tagged" || ai["stack"] != "total" {
 		t.Errorf("ai series misconfigured: %+v", ai)
 	}
-	if _, hasMark := ai["markLine"]; !hasMark {
-		t.Errorf("expected markLine on AI series when cutover detected; got: %+v", ai)
+	// markLine is deliberately not in the option — the cutover marker is
+	// drawn as a JS graphic overlay (template.html.tmpl: overlayCutover)
+	// because markLine on a category axis would snap through a bar.
+	if _, hasMark := ai["markLine"]; hasMark {
+		t.Errorf("AI series carries markLine; expected it to be overlay-only: %+v", ai)
+	}
+	if got.ThroughputCutoverIdx != 6 {
+		t.Errorf("ThroughputCutoverIdx = %d, want 6 (sampleCutover at week 6)", got.ThroughputCutoverIdx)
 	}
 
 	title, _ := opt["title"].(map[string]any)
@@ -107,8 +113,11 @@ func TestBuildChartPayload_AdoptionShape(t *testing.T) {
 	if s0["type"] != "line" {
 		t.Errorf("adoption series type = %v, want line", s0["type"])
 	}
-	if _, hasMark := s0["markLine"]; !hasMark {
-		t.Errorf("expected markLine on adoption series when cutover detected; got: %+v", s0)
+	if _, hasMark := s0["markLine"]; hasMark {
+		t.Errorf("adoption series carries markLine; expected overlay-only: %+v", s0)
+	}
+	if got.AdoptionCutoverIdx != 6 {
+		t.Errorf("AdoptionCutoverIdx = %d, want 6", got.AdoptionCutoverIdx)
 	}
 
 	y, _ := opt["yAxis"].(map[string]any)
@@ -117,20 +126,17 @@ func TestBuildChartPayload_AdoptionShape(t *testing.T) {
 	}
 }
 
-func TestBuildChartPayload_NoCutoverOmitsMarkLine(t *testing.T) {
+func TestBuildChartPayload_NoCutoverSignalsAbsence(t *testing.T) {
 	weeks := sampleWeeks()
 	got, err := BuildChartPayload(weeks, analyze.Cutover{Detected: false})
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
-	opt := decodeOption(t, string(got.ThroughputJSON))
-	series, _ := opt["series"].([]any)
-	for i, s := range series {
-		sm, _ := s.(map[string]any)
-		if _, hasMark := sm["markLine"]; hasMark {
-			t.Errorf("series[%d] has markLine but cutover not detected", i)
-		}
+	if got.ThroughputCutoverIdx != -1 || got.AdoptionCutoverIdx != -1 {
+		t.Errorf("expected CutoverIdx == -1 when not detected, got %d/%d",
+			got.ThroughputCutoverIdx, got.AdoptionCutoverIdx)
 	}
+	opt := decodeOption(t, string(got.ThroughputJSON))
 	title, _ := opt["title"].(map[string]any)
 	if _, hasSubtext := title["subtext"]; hasSubtext {
 		t.Errorf("title.subtext should be absent when cutover not detected; got: %+v", title)

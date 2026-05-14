@@ -9,12 +9,19 @@ import (
 )
 
 // ChartPayload holds JSON-encoded Apache ECharts option objects for the
-// charts on the deck. Each field is marked template.JS so the HTML
-// template can embed it verbatim inside a <script> block — JSON object
-// literals are valid JS expressions.
+// charts on the deck. Each option field is marked template.JS so the
+// HTML template can embed it verbatim inside a <script> block — JSON
+// object literals are valid JS expressions.
+//
+// The CutoverIdx fields are not part of the ECharts option — they're
+// passed alongside so the template's JS can draw the cutover marker as
+// a graphic overlay (positioned via convertToPixel at the category
+// boundary, not snapped to a bar center as markLine would be).
 type ChartPayload struct {
-	ThroughputJSON template.JS
-	AdoptionJSON   template.JS
+	ThroughputJSON       template.JS
+	AdoptionJSON         template.JS
+	ThroughputCutoverIdx int // -1 if no cutover detected
+	AdoptionCutoverIdx   int
 }
 
 // Dark-theme palette — kept in sync with template.html.tmpl's CSS vars.
@@ -39,6 +46,7 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover) (Char
 	if len(weeks) == 0 {
 		return ChartPayload{}, fmt.Errorf("BuildChartPayload: no weekly data")
 	}
+	_, cutoverIdx := axisLabelsAndCutover(weeks, cutover)
 	thru, err := marshalOption(buildThroughputOption(weeks, cutover))
 	if err != nil {
 		return ChartPayload{}, fmt.Errorf("marshal throughput option: %w", err)
@@ -52,8 +60,10 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover) (Char
 	// option map (only numbers, ECharts keywords, and time-formatted
 	// strings), so the template.JS conversion is safe here.
 	return ChartPayload{
-		ThroughputJSON: template.JS(thru),  // #nosec G203 -- JSON-encoded payload, see comment above
-		AdoptionJSON:   template.JS(adopt), // #nosec G203 -- JSON-encoded payload, see comment above
+		ThroughputJSON:       template.JS(thru),  // #nosec G203 -- JSON-encoded payload, see comment above
+		AdoptionJSON:         template.JS(adopt), // #nosec G203 -- JSON-encoded payload, see comment above
+		ThroughputCutoverIdx: cutoverIdx,
+		AdoptionCutoverIdx:   cutoverIdx,
 	}, nil
 }
 
@@ -62,10 +72,12 @@ func marshalOption(opt map[string]any) ([]byte, error) {
 }
 
 // buildThroughputOption produces the ECharts option for the stacked
-// weekly commit bar chart (human vs AI-tagged). When the cutover is
-// detected an amber vertical markLine is placed at the cutover week.
+// weekly commit bar chart (human vs AI-tagged). The cutover marker is
+// drawn as a JS graphic overlay (see overlayCutover in the template)
+// rather than an ECharts markLine — markLine on a category axis snaps
+// to integer indices, which would force the line through a bar centre.
 func buildThroughputOption(weeks []analyze.WeekStats, cutover analyze.Cutover) map[string]any {
-	labels, cutoverIdx := axisLabelsAndCutover(weeks, cutover)
+	labels, _ := axisLabelsAndCutover(weeks, cutover)
 	human := make([]int, len(weeks))
 	ai := make([]int, len(weeks))
 	for i, w := range weeks {
@@ -80,9 +92,6 @@ func buildThroughputOption(weeks []analyze.WeekStats, cutover analyze.Cutover) m
 	aiSeries := map[string]any{
 		"name": "AI-tagged", "type": "bar", "stack": "total", "data": ai,
 		"itemStyle": map[string]any{"borderRadius": []int{3, 3, 0, 0}},
-	}
-	if cutoverIdx >= 0 {
-		aiSeries["markLine"] = cutoverMarkLine(cutoverIdx)
 	}
 
 	opt := darkChartBase("Weekly commits", cutover)
@@ -99,7 +108,7 @@ func buildThroughputOption(weeks []analyze.WeekStats, cutover analyze.Cutover) m
 // adoption line chart (percentage of weekly active devs with at least
 // one AI-tagged commit).
 func buildAdoptionOption(weeks []analyze.WeekStats, cutover analyze.Cutover) map[string]any {
-	labels, cutoverIdx := axisLabelsAndCutover(weeks, cutover)
+	labels, _ := axisLabelsAndCutover(weeks, cutover)
 	pct := make([]float64, len(weeks))
 	for i, w := range weeks {
 		pct[i] = w.AdoptionRatio() * 100
@@ -114,9 +123,6 @@ func buildAdoptionOption(weeks []analyze.WeekStats, cutover analyze.Cutover) map
 		"symbolSize": 8,
 		"lineStyle":  map[string]any{"width": 3},
 		"areaStyle":  map[string]any{"opacity": 0.18},
-	}
-	if cutoverIdx >= 0 {
-		series["markLine"] = cutoverMarkLine(cutoverIdx)
 	}
 
 	opt := darkChartBase("AI adoption — % of weekly active devs", cutover)
@@ -231,31 +237,4 @@ func titleWithCutover(text string, cutover analyze.Cutover) map[string]any {
 		title["subtextStyle"] = map[string]any{"color": chartMuted, "fontSize": 13}
 	}
 	return title
-}
-
-// cutoverMarkLine returns a dashed amber vertical line at xIndex with a
-// pill-shaped label that reads cleanly regardless of where it sits on
-// the axis (including index 0, where ECharts' default end-positioned
-// label would be clipped against the chart edge).
-func cutoverMarkLine(xIndex int) map[string]any {
-	return map[string]any{
-		"silent": true,
-		"symbol": "none",
-		"lineStyle": map[string]any{
-			"color": chartAccent,
-			"type":  "dashed",
-			"width": 3,
-		},
-		"label": map[string]any{
-			"formatter":       "▼ AI cutover",
-			"position":        "insideStartTop",
-			"color":           chartDeckBG,
-			"backgroundColor": chartAccent,
-			"padding":         []int{4, 10, 4, 10},
-			"borderRadius":    4,
-			"fontWeight":      "bold",
-			"fontSize":        13,
-		},
-		"data": []map[string]any{{"xAxis": xIndex}},
-	}
 }

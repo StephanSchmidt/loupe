@@ -260,17 +260,89 @@
   const throughputOption = {{ .Charts.ThroughputJSON }};
   const adoptionOption = {{ .Charts.AdoptionJSON }};
 
+  // Cutover indices come alongside the option payloads. The cutover
+  // marker is drawn as a `graphic` overlay (see overlayCutover below)
+  // because ECharts markLine on a category axis snaps to integer
+  // indices, which forces the line through a bar centre.
+  const chartOptions = {
+    throughput: throughputOption,
+    adoption: adoptionOption,
+  };
+  const cutoverIdx = {
+    throughput: {{ .Charts.ThroughputCutoverIdx }},
+    adoption: {{ .Charts.AdoptionCutoverIdx }},
+  };
+  const chartInstances = {};
+
+  // overlayCutover draws a red dashed vertical line at the boundary
+  // adjacent to the cutover bar (never through it), plus a pill label.
+  // Positions are computed in pixels via convertToPixel so the line
+  // lands at the exact midpoint between bar centres regardless of how
+  // many weeks the data covers or how reveal scales the slide.
+  function overlayCutover(instance, idx) {
+    if (idx < 0 || idx === null || idx === undefined) {
+      instance.setOption({ graphic: { elements: [{ $action: 'remove', id: 'cutover' }] } });
+      return;
+    }
+    // Boundary between bar (leftRef) and bar (rightRef). For idx >= 1
+    // the line sits to the LEFT of the cutover bar (between idx-1 and
+    // idx). For idx === 0 (first bar) we shift to the RIGHT of bar 0
+    // so the line stays inside the plot area instead of hugging the
+    // y-axis edge.
+    const leftRef  = idx === 0 ? 0 : idx - 1;
+    const rightRef = idx === 0 ? 1 : idx;
+    const pxLeft  = instance.convertToPixel({ xAxisIndex: 0 }, leftRef);
+    const pxRight = instance.convertToPixel({ xAxisIndex: 0 }, rightRef);
+    if (!isFinite(pxLeft) || !isFinite(pxRight)) return;
+    const x = (pxLeft + pxRight) / 2;
+
+    // Plot vertical bounds: from the y-axis maximum (top) to minimum (bottom).
+    const yExtent = instance.getModel().getComponent('yAxis', 0).axis.scale.getExtent();
+    const yTop = instance.convertToPixel({ yAxisIndex: 0 }, yExtent[1]);
+    const yBot = instance.convertToPixel({ yAxisIndex: 0 }, yExtent[0]);
+
+    instance.setOption({
+      graphic: {
+        elements: [{
+          id: 'cutover',
+          type: 'group',
+          silent: true,
+          z: 100,
+          children: [
+            {
+              type: 'line',
+              shape: { x1: x, y1: yTop, x2: x, y2: yBot },
+              style: { stroke: '#ef4444', lineWidth: 3, lineDash: [8, 6] }
+            },
+            {
+              type: 'rect',
+              shape: { x: x - 60, y: yTop - 12, width: 120, height: 22 },
+              style: { fill: '#ef4444' }
+            },
+            {
+              type: 'text',
+              style: {
+                text: '▼ AI cutover',
+                fill: '#ffffff',
+                fontWeight: 'bold',
+                fontSize: 13,
+                x: x,
+                y: yTop - 1,
+                textAlign: 'center',
+                textVerticalAlign: 'middle'
+              }
+            }
+          ]
+        }]
+      }
+    });
+  }
+
   // Reveal hides non-current slides with display:none. Initialising an
   // ECharts instance on a hidden container locks it to 0×0 and resize()
   // doesn't always recover; instead lazy-init each chart the first time
   // its slide becomes visible. <section data-chart="..."> is the
   // discriminator so the script doesn't hard-code chart IDs.
-  const chartOptions = {
-    throughput: throughputOption,
-    adoption: adoptionOption,
-  };
-  const chartInstances = {};
-
   function showChartFor(slide) {
     if (!slide) return;
     const kind = slide.dataset && slide.dataset.chart;
@@ -284,6 +356,7 @@
       chartInstances[kind] = instance;
     }
     instance.resize();
+    overlayCutover(instance, cutoverIdx[kind]);
   }
 
   Reveal.initialize({
@@ -299,7 +372,10 @@
     // (e.g. via #/3) — the slidechanged event won't fire for the initial slide.
     showChartFor(Reveal.getCurrentSlide());
     window.addEventListener('resize', function () {
-      for (const k in chartInstances) chartInstances[k].resize();
+      for (const k in chartInstances) {
+        chartInstances[k].resize();
+        overlayCutover(chartInstances[k], cutoverIdx[k]);
+      }
     });
   });
 </script>
