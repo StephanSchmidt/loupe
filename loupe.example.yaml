@@ -3,13 +3,13 @@ org: acme-eng
 git_host:
   provider: bitbucket-cloud
   base_url: https://api.bitbucket.org/2.0
-  username: stephan@inkmi.com
+  username: you@example.com
   # Bitbucket app password is prompted at every `loupe baseline` invocation.
 
 tracker:
   provider: jira-cloud
   site: acme.atlassian.net
-  email: stephan@inkmi.com
+  email: you@example.com
   # Jira API token is prompted at every `loupe baseline` invocation.
 
 teams:

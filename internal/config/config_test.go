@@ -13,12 +13,12 @@ org: acme-eng
 git_host:
   provider: bitbucket-cloud
   base_url: https://api.bitbucket.org/2.0
-  username: stephan@inkmi.com
+  username: you@example.com
 
 tracker:
   provider: jira-cloud
   site: acme.atlassian.net
-  email: stephan@inkmi.com
+  email: you@example.com
 
 teams:
   - name: platform
@@ -84,7 +84,7 @@ func TestLoad_FullConfigRoundtrip(t *testing.T) {
 	if c.GitHost.Provider != ProviderBitbucketCloud {
 		t.Errorf("GitHost.Provider = %q, want %q", c.GitHost.Provider, ProviderBitbucketCloud)
 	}
-	if c.GitHost.Username != "stephan@inkmi.com" {
+	if c.GitHost.Username != "you@example.com" {
 		t.Errorf("GitHost.Username = %q", c.GitHost.Username)
 	}
 	if c.Tracker.Provider != ProviderJiraCloud {

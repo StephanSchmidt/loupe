@@ -105,7 +105,7 @@ git_host:
 tracker:
   provider: jira-cloud
   site: smoke.atlassian.net
-  email: smoke@inkmi.com
+  email: smoke@example.com
 ai_adoption:
   detection:
     co_author_trailers: true

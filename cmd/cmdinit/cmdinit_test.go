@@ -27,9 +27,9 @@ func TestInit_WritesValidConfigThatLoads(t *testing.T) {
 	stdin := strings.Join([]string{
 		"acme-eng",           // org
 		"",                   // bitbucket base url (accept default)
-		"stephan@inkmi.com",  // bitbucket username
+		"you@example.com",  // bitbucket username
 		"acme.atlassian.net", // jira site
-		"stephan@inkmi.com",  // jira email
+		"you@example.com",  // jira email
 	}, "\n") + "\n"
 
 	stdout, err := runWizard(t, dir, stdin)
@@ -48,10 +48,10 @@ func TestInit_WritesValidConfigThatLoads(t *testing.T) {
 		"org: acme-eng",
 		"provider: bitbucket-cloud",
 		"base_url: https://api.bitbucket.org/2.0",
-		"username: stephan@inkmi.com",
+		"username: you@example.com",
 		"provider: jira-cloud",
 		"site: acme.atlassian.net",
-		"email: stephan@inkmi.com",
+		"email: you@example.com",
 	} {
 		if !strings.Contains(string(body), want) {
 			t.Errorf("written config missing %q", want)

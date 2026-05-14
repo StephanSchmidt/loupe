@@ -160,12 +160,12 @@ org: acme-eng
 git_host:
   provider: bitbucket-cloud
   base_url: https://api.bitbucket.org/2.0
-  username: stephan@inkmi.com
+  username: you@example.com
 
 tracker:
   provider: jira-cloud
   site: acme.atlassian.net
-  email: stephan@inkmi.com
+  email: you@example.com
 
 teams:
   - name: platform
