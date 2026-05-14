@@ -274,32 +274,36 @@
   };
   const chartInstances = {};
 
-  // overlayCutover draws a red dashed vertical line at the boundary
-  // adjacent to the cutover bar (never through it), plus a pill label.
-  // Positions are computed in pixels via convertToPixel so the line
-  // lands at the exact midpoint between bar centres regardless of how
-  // many weeks the data covers or how reveal scales the slide.
+  // overlayCutover draws a red dashed vertical line at the LEFT
+  // boundary of the cutover bar's slot — bar `idx` is the first
+  // AI-adoption week (per analyze.DetectCutover) and belongs on the
+  // "post-AI" side of the line. Positions are computed in pixels via
+  // convertToPixel so the line lands at the slot boundary regardless
+  // of week count or reveal's slide scale.
+  //   idx >= 1 → midpoint between bars (idx-1) and idx
+  //   idx == 0 → left edge of bar 0's slot, sampled via bar 1
   function overlayCutover(instance, idx) {
-    if (idx < 0 || idx === null || idx === undefined) {
+    if (idx == null || idx < 0) {
       instance.setOption({ graphic: { elements: [{ $action: 'remove', id: 'cutover' }] } });
       return;
     }
-    // Boundary between bar (leftRef) and bar (rightRef). For idx >= 1
-    // the line sits to the LEFT of the cutover bar (between idx-1 and
-    // idx). For idx === 0 (first bar) we shift to the RIGHT of bar 0
-    // so the line stays inside the plot area instead of hugging the
-    // y-axis edge.
-    const leftRef  = idx === 0 ? 0 : idx - 1;
-    const rightRef = idx === 0 ? 1 : idx;
-    const pxLeft  = instance.convertToPixel({ xAxisIndex: 0 }, leftRef);
-    const pxRight = instance.convertToPixel({ xAxisIndex: 0 }, rightRef);
-    if (!isFinite(pxLeft) || !isFinite(pxRight)) return;
-    const x = (pxLeft + pxRight) / 2;
+    const pxC = instance.convertToPixel({ xAxisIndex: 0 }, idx);
+    const pxNeighbour = instance.convertToPixel({ xAxisIndex: 0 }, idx === 0 ? 1 : idx - 1);
+    if (!isFinite(pxC) || !isFinite(pxNeighbour)) return;
+    const slotHalf = Math.abs(pxC - pxNeighbour) / 2;
+    const x = pxC - slotHalf;
 
     // Plot vertical bounds: from the y-axis maximum (top) to minimum (bottom).
     const yExtent = instance.getModel().getComponent('yAxis', 0).axis.scale.getExtent();
     const yTop = instance.convertToPixel({ yAxisIndex: 0 }, yExtent[1]);
     const yBot = instance.convertToPixel({ yAxisIndex: 0 }, yExtent[0]);
+
+    // When the line sits at the plot's left edge (idx == 0), a centred
+    // pill would clip past the chart; nudge it to the right of the
+    // line so it points INTO the plot instead of straddling the edge.
+    const atLeftEdge = idx === 0;
+    const pillX = atLeftEdge ? x + 4 : x - 60;
+    const textX = atLeftEdge ? x + 64 : x;
 
     instance.setOption({
       graphic: {
@@ -316,7 +320,7 @@
             },
             {
               type: 'rect',
-              shape: { x: x - 60, y: yTop - 12, width: 120, height: 22 },
+              shape: { x: pillX, y: yTop - 12, width: 120, height: 22 },
               style: { fill: '#ef4444' }
             },
             {
@@ -326,7 +330,7 @@
                 fill: '#ffffff',
                 fontWeight: 'bold',
                 fontSize: 13,
-                x: x,
+                x: textX,
                 y: yTop - 1,
                 textAlign: 'center',
                 textVerticalAlign: 'middle'
