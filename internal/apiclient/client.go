@@ -183,7 +183,7 @@ func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body io.
 			_ = resp.Body.Close()
 			select {
 			case <-ctx.Done():
-				return nil, ctx.Err()
+				return nil, fmt.Errorf("%s %s %s (waiting for 429 retry): %w", c.displayName(), method, path, ctx.Err())
 			case <-time.After(delay):
 			}
 			resp, err = c.http.Do(req)
