@@ -174,41 +174,58 @@ func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body io.
 	if resp == nil {
 		return nil, fmt.Errorf("%s %s %s: nil response", c.displayName(), method, path)
 	}
-	// One-shot retry on 429 if the upstream gives us a usable Retry-After
-	// hint. We only retry GETs (body == nil) so we don't have to rewind a
-	// consumed request body.
 	if resp.StatusCode == http.StatusTooManyRequests && body == nil {
-		if delay, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok && delay <= maxRetryAfter {
-			_, _ = io.Copy(io.Discard, resp.Body)
-			_ = resp.Body.Close()
-			select {
-			case <-ctx.Done():
-				return nil, fmt.Errorf("%s %s %s (waiting for 429 retry): %w", c.displayName(), method, path, ctx.Err())
-			case <-time.After(delay):
-			}
-			resp, err = c.http.Do(req)
-			if err != nil {
-				return nil, fmt.Errorf("%s %s %s (after 429 retry): %w", c.displayName(), method, path, err)
-			}
-			if resp == nil {
-				return nil, fmt.Errorf("%s %s %s (after 429 retry): nil response", c.displayName(), method, path)
-			}
+		resp, err = c.retryAfter429(ctx, req, resp, method, path)
+		if err != nil {
+			return nil, err
 		}
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		// Drain the rest so the connection can be reused under keep-alive.
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-		return nil, &StatusError{
-			StatusCode: resp.StatusCode,
-			Method:     method,
-			Path:       path,
-			Body:       string(respBody),
-			Provider:   c.displayName(),
-		}
+		return nil, c.toStatusError(resp, method, path)
 	}
 	return resp, nil
+}
+
+// retryAfter429 performs a one-shot retry when the upstream returns 429
+// with a usable Retry-After hint. Only GETs (body == nil) reach this
+// path — we don't have to rewind a consumed request body. Returns the
+// original response unchanged when the hint is missing or out of range.
+func (c *Client) retryAfter429(ctx context.Context, req *http.Request, resp *http.Response, method, path string) (*http.Response, error) {
+	delay, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
+	if !ok || delay > maxRetryAfter {
+		return resp, nil
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("%s %s %s (waiting for 429 retry): %w", c.displayName(), method, path, ctx.Err())
+	case <-time.After(delay):
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("%s %s %s (after 429 retry): %w", c.displayName(), method, path, err)
+	}
+	if resp == nil {
+		return nil, fmt.Errorf("%s %s %s (after 429 retry): nil response", c.displayName(), method, path)
+	}
+	return resp, nil
+}
+
+// toStatusError drains a non-2xx response body (capped at 1KiB for the
+// returned snippet, rest discarded for keep-alive reuse) and returns a
+// StatusError describing it.
+func (c *Client) toStatusError(resp *http.Response, method, path string) error {
+	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+	return &StatusError{
+		StatusCode: resp.StatusCode,
+		Method:     method,
+		Path:       path,
+		Body:       string(respBody),
+		Provider:   c.displayName(),
+	}
 }
 
 func (c *Client) displayName() string {

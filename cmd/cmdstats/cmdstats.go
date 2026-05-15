@@ -287,7 +287,51 @@ func writeAuthorAdoption(ctx context.Context, s *store.Store, out io.Writer) err
 // hand-written.
 var revertSHAPattern = regexp.MustCompile(`This reverts commit ([0-9a-fA-F]{7,40})`)
 
+// revertCommit is the post-filter row shape we keep in memory to count
+// reverts and resolve revert backlinks against. Bots have already been
+// dropped by the time a row becomes a revertCommit.
+type revertCommit struct {
+	sha     string
+	message string
+	isAI    bool
+}
+
+type revertScan struct {
+	all          map[string]revertCommit
+	revertedSHAs map[string]struct{}
+	totalCommits int
+	totalAI      int
+	revertCount  int
+}
+
 func writeRevertRate(ctx context.Context, s *store.Store, out io.Writer) error {
+	scan, err := loadRevertScan(ctx, s)
+	if err != nil {
+		return err
+	}
+	if scan.totalCommits == 0 {
+		return nil
+	}
+
+	aiReverted, humanReverted := classifyReverts(scan)
+
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Reverts: %d of %d commits  (%.1f%%)\n",
+		scan.revertCount, scan.totalCommits,
+		float64(scan.revertCount)/float64(scan.totalCommits)*100)
+	humanCommits := scan.totalCommits - scan.totalAI
+	if scan.totalAI > 0 {
+		_, _ = fmt.Fprintf(out, "  AI commits reverted:    %d of %4d  (%5.1f%%)\n",
+			aiReverted, scan.totalAI, float64(aiReverted)/float64(scan.totalAI)*100)
+	}
+	if humanCommits > 0 {
+		_, _ = fmt.Fprintf(out, "  Human commits reverted: %d of %4d  (%5.1f%%)\n",
+			humanReverted, humanCommits, float64(humanReverted)/float64(humanCommits)*100)
+	}
+	return nil
+}
+
+func loadRevertScan(ctx context.Context, s *store.Store) (revertScan, error) {
 	rows, err := s.DB().QueryContext(ctx, `
         SELECT c.sha, c.message, c.author_email, c.author_name,
                CASE WHEN sig.commit_sha IS NOT NULL THEN 1 ELSE 0 END AS is_ai
@@ -296,59 +340,44 @@ func writeRevertRate(ctx context.Context, s *store.Store, out io.Writer) error {
             ON sig.commit_sha = c.sha
     `)
 	if err != nil {
-		return fmt.Errorf("query reverts: %w", err)
+		return revertScan{}, fmt.Errorf("query reverts: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	type commitRow struct {
-		sha     string
-		message string
-		isAI    bool
+	scan := revertScan{
+		all:          make(map[string]revertCommit),
+		revertedSHAs: make(map[string]struct{}),
 	}
-	all := make(map[string]commitRow)
-	var totalCommits, totalAI, revertCommits int
-	revertedSHAs := make(map[string]struct{})
-
 	for rows.Next() {
-		var r commitRow
+		var r revertCommit
 		var email, name string
 		var ai int
 		if err := rows.Scan(&r.sha, &r.message, &email, &name, &ai); err != nil {
-			return fmt.Errorf("scan revert row: %w", err)
+			return revertScan{}, fmt.Errorf("scan revert row: %w", err)
 		}
 		if analyze.IsBot(email, name) {
 			continue
 		}
 		r.isAI = ai == 1
-		all[r.sha] = r
-		totalCommits++
+		scan.all[r.sha] = r
+		scan.totalCommits++
 		if r.isAI {
-			totalAI++
+			scan.totalAI++
 		}
 		if m := revertSHAPattern.FindStringSubmatch(r.message); m != nil {
-			revertCommits++
-			revertedSHAs[m[1]] = struct{}{}
+			scan.revertCount++
+			scan.revertedSHAs[m[1]] = struct{}{}
 		}
 	}
 	if err := rows.Err(); err != nil {
-		return err
+		return revertScan{}, err
 	}
-	if totalCommits == 0 {
-		return nil
-	}
+	return scan, nil
+}
 
-	aiReverted, humanReverted := 0, 0
-	for sha := range revertedSHAs {
-		c, ok := all[sha]
-		if !ok {
-			// Short-SHA backlinks: try prefix match against indexed commits.
-			for fullSHA, row := range all {
-				if len(sha) >= 7 && len(fullSHA) >= len(sha) && fullSHA[:len(sha)] == sha {
-					c, ok = row, true
-					break
-				}
-			}
-		}
+func classifyReverts(scan revertScan) (aiReverted, humanReverted int) {
+	for sha := range scan.revertedSHAs {
+		c, ok := lookupRevertTarget(scan.all, sha)
 		if !ok {
 			continue
 		}
@@ -358,20 +387,25 @@ func writeRevertRate(ctx context.Context, s *store.Store, out io.Writer) error {
 			humanReverted++
 		}
 	}
+	return aiReverted, humanReverted
+}
 
-	_, _ = fmt.Fprintln(out)
-	_, _ = fmt.Fprintf(out, "Reverts: %d of %d commits  (%.1f%%)\n",
-		revertCommits, totalCommits, float64(revertCommits)/float64(totalCommits)*100)
-	humanCommits := totalCommits - totalAI
-	if totalAI > 0 {
-		_, _ = fmt.Fprintf(out, "  AI commits reverted:    %d of %4d  (%5.1f%%)\n",
-			aiReverted, totalAI, float64(aiReverted)/float64(totalAI)*100)
+// lookupRevertTarget resolves a revert backlink to its target commit. A
+// revert message may carry either a full SHA (direct map hit) or a 7+
+// character prefix (linear prefix scan against indexed commits).
+func lookupRevertTarget(all map[string]revertCommit, sha string) (revertCommit, bool) {
+	if c, ok := all[sha]; ok {
+		return c, true
 	}
-	if humanCommits > 0 {
-		_, _ = fmt.Fprintf(out, "  Human commits reverted: %d of %4d  (%5.1f%%)\n",
-			humanReverted, humanCommits, float64(humanReverted)/float64(humanCommits)*100)
+	if len(sha) < 7 {
+		return revertCommit{}, false
 	}
-	return nil
+	for fullSHA, row := range all {
+		if len(fullSHA) >= len(sha) && fullSHA[:len(sha)] == sha {
+			return row, true
+		}
+	}
+	return revertCommit{}, false
 }
 
 func seriesFromWeeks(weeks []analyze.WeekStats) (commits, ai, ratio []float64) {
