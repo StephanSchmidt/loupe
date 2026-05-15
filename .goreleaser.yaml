@@ -31,11 +31,14 @@ brews:
   - repository:
       owner: StephanSchmidt
       name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
     homepage: https://github.com/StephanSchmidt/loupe
-    description: TODO
+    description: Diagnostic CLI that measures the impact of AI coding assistants on engineering teams
     license: MIT
     install: |
       bin.install "loupe"
+    test: |
+      system "#{bin}/loupe", "--version"
 
 changelog:
   sort: asc
