@@ -174,9 +174,56 @@ func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider
 		if err := upsertPR(ctx, db, provider, repo, pr); err != nil {
 			return n, err
 		}
+		if err := ingestPRCommits(ctx, db, gh, provider, repo, pr); err != nil {
+			return n, err
+		}
 		n++
 	}
 	return n, nil
+}
+
+// ingestPRCommits fetches the PR's pre-squash commits via ListPRCommits
+// and persists them into pr_commits so the squash-recovery detector can
+// read the original commit messages. A PR-commit's SHA may or may not
+// also exist in `commits` (it does for regular merges, doesn't for
+// squash merges) — pr_commits carries an independent copy of the
+// message either way so detection doesn't depend on which merge mode
+// the destination branch ended up using.
+//
+// Errors from the per-PR commit API are non-fatal — squash recovery is
+// a recall booster, not a correctness requirement, and a 404/403 on a
+// single PR shouldn't abort the whole ingest run.
+func ingestPRCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, pr githost.PullRequest) error {
+	id := scopedPRID(provider, repo.FullName(), pr.ID)
+	commits, err := gh.ListPRCommits(ctx, repo.RepoRef, pr.ID)
+	if err != nil {
+		// Surface the error in logs eventually; for now, swallow so a
+		// single bad PR doesn't kill the rest of the ingest.
+		return nil //nolint:nilerr // intentional best-effort fetch
+	}
+	for _, c := range commits {
+		if err := upsertPRCommit(ctx, db, id, c); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+const upsertPRCommitSQL = `
+INSERT INTO pr_commits (pr_id, commit_sha, author_email, author_name, message)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(pr_id, commit_sha) DO UPDATE SET
+    author_email = excluded.author_email,
+    author_name  = excluded.author_name,
+    message      = excluded.message
+`
+
+func upsertPRCommit(ctx context.Context, db *sql.DB, prID string, c githost.Commit) error {
+	_, err := db.ExecContext(ctx, upsertPRCommitSQL, prID, c.SHA, c.AuthorEmail, c.AuthorName, c.Message)
+	if err != nil {
+		return fmt.Errorf("upsert pr_commit %s/%s: %w", prID, c.SHA, err)
+	}
+	return nil
 }
 
 const upsertWorkspaceSQL = `
@@ -282,9 +329,10 @@ func upsertCommit(ctx context.Context, db *sql.DB, provider string, repo githost
 const upsertPRSQL = `
 INSERT INTO prs (
     id, provider, workspace, repo_name, title, state, author_email,
+    author_login, author_is_bot,
     source_branch, destination_branch, created_at, merged_at, closed_at,
     merge_commit_sha, labels
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     provider           = excluded.provider,
     workspace          = excluded.workspace,
@@ -292,6 +340,8 @@ ON CONFLICT(id) DO UPDATE SET
     title              = excluded.title,
     state              = excluded.state,
     author_email       = excluded.author_email,
+    author_login       = excluded.author_login,
+    author_is_bot      = excluded.author_is_bot,
     source_branch      = excluded.source_branch,
     destination_branch = excluded.destination_branch,
     merged_at          = excluded.merged_at,
@@ -325,9 +375,14 @@ func upsertPR(ctx context.Context, db *sql.DB, provider string, repo githost.Rep
 		closedAt = sql.NullInt64{Int64: pr.ClosedAt.Unix(), Valid: true}
 	}
 	id := scopedPRID(provider, repo.FullName(), pr.ID)
+	isBot := 0
+	if pr.AuthorIsBot {
+		isBot = 1
+	}
 	_, err := db.ExecContext(ctx, upsertPRSQL,
 		id, provider, repo.Workspace, repo.FullName(),
 		pr.Title, pr.State, pr.AuthorEmail,
+		pr.AuthorLogin, isBot,
 		pr.SourceBranch, pr.DestinationBranch,
 		pr.CreatedAt.Unix(), mergedAt, closedAt,
 		pr.MergeCommitSHA, labels,

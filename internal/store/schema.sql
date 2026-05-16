@@ -36,6 +36,8 @@ CREATE TABLE IF NOT EXISTS prs (
     title               TEXT NOT NULL,
     state               TEXT NOT NULL,        -- "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED"
     author_email        TEXT NOT NULL,
+    author_login        TEXT NOT NULL DEFAULT '', -- GitHub login / Bitbucket nickname; "[bot]" suffix on App identities
+    author_is_bot       INTEGER NOT NULL DEFAULT 0, -- 1 if host reports the author as a bot (GitHub user.type=="Bot")
     source_branch       TEXT NOT NULL,
     destination_branch  TEXT NOT NULL,
     created_at          INTEGER NOT NULL,
@@ -48,9 +50,18 @@ CREATE TABLE IF NOT EXISTS prs (
 CREATE INDEX IF NOT EXISTS idx_prs_created_at ON prs(created_at);
 CREATE INDEX IF NOT EXISTS idx_prs_merged_at  ON prs(merged_at);
 
+-- pr_commits captures the pre-squash commits attached to a PR via the
+-- provider's "PR commits" API. For regular merges the SHAs in this table
+-- usually appear in `commits` too (they landed on the destination branch).
+-- For squash merges they don't — the row exists so the squash-recovery
+-- detector can read the original commit message and emit signals against
+-- the PR's merge_commit_sha.
 CREATE TABLE IF NOT EXISTS pr_commits (
-    pr_id       TEXT NOT NULL,
-    commit_sha  TEXT NOT NULL,
+    pr_id        TEXT NOT NULL,
+    commit_sha   TEXT NOT NULL,
+    author_email TEXT NOT NULL DEFAULT '',
+    author_name  TEXT NOT NULL DEFAULT '',
+    message      TEXT NOT NULL DEFAULT '',
     PRIMARY KEY (pr_id, commit_sha)
 );
 

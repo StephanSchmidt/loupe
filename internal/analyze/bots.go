@@ -1,6 +1,9 @@
 package analyze
 
-import "strings"
+import (
+	"regexp"
+	"strings"
+)
 
 // IsBot reports whether a commit author is an automated bot rather than
 // a human contributor. Used to exclude bot-authored commits from every
@@ -11,7 +14,13 @@ import "strings"
 // requires either the exact GitHub `[bot]` suffix convention or a match
 // against a small list of known automation identities.
 func IsBot(email, name string) bool {
-	return botDisplayLookup(email, name) != "" || hasBotSuffix(name)
+	if botDisplayLookup(email, name) != "" || hasBotSuffix(name) {
+		return true
+	}
+	// Catch GitHub App bots not (yet) in the curated list. Without this an
+	// `acme-autofix[bot]@users.noreply.github.com` commit with an empty
+	// author name would slip through the curated + suffix checks.
+	return loginFromGitHubBotEmail(strings.ToLower(strings.TrimSpace(email))) != ""
 }
 
 // BotDisplayName returns the canonical display label for an automated
@@ -32,6 +41,11 @@ func BotDisplayName(email, name string) string {
 			return stripped
 		}
 	}
+	// PR rows and commits with empty author names: derive the login from
+	// the noreply email when it matches the GitHub App shape.
+	if login := loginFromGitHubBotEmail(strings.ToLower(strings.TrimSpace(email))); login != "" {
+		return login
+	}
 	if name != "" {
 		return name
 	}
@@ -46,6 +60,11 @@ func hasBotSuffix(name string) bool {
 // or "" when nothing matches. Order in botRules matters only when two
 // substrings could collide — currently they don't, but keep the list
 // stable when adding entries.
+//
+// Intentionally curated-only: signals_bot.looksLikeGitHubBot relies on a
+// "" return for unknown-but-bot-shaped identities to flag them as
+// SourceUnknownAIBot. The generic email-regex fallback lives in IsBot /
+// BotDisplayName instead.
 func botDisplayLookup(email, name string) string {
 	e := strings.ToLower(strings.TrimSpace(email))
 	if e == "noreply@github.com" {
@@ -59,6 +78,19 @@ func botDisplayLookup(email, name string) string {
 	return ""
 }
 
+// ghBotEmail matches GitHub's generic App-bot email shape, e.g.
+// `49699333+dependabot[bot]@users.noreply.github.com`. The capture group
+// is the login (the part before `[bot]`).
+var ghBotEmail = regexp.MustCompile(`^\d+\+([^@]+)\[bot\]@users\.noreply\.github\.com$`)
+
+func loginFromGitHubBotEmail(lowerEmail string) string {
+	m := ghBotEmail.FindStringSubmatch(lowerEmail)
+	if len(m) < 2 {
+		return ""
+	}
+	return m[1]
+}
+
 // botRules is the curated mapping of automation identities to their
 // display labels. Each entry is a commitment to filter every commit whose
 // email contains the substring — keep narrow, add only when you've
@@ -69,14 +101,41 @@ type botRule struct {
 }
 
 var botRules = []botRule{
+	// Dependency-update bots.
 	{"dependabot", "Dependabot"},
 	{"renovate", "Renovate"},
+	{"release-please", "release-please"},
+	{"semantic-release-bot", "semantic-release"},
+	// CI / forge automation.
 	{"github-actions", "GitHub Actions"},
 	{"mergify", "Mergify"},
-	{"codecov", "Codecov"},
+	{"pre-commit-ci", "pre-commit.ci"},
+	// Security / SCA bots that auto-open fix PRs.
+	{"aikido-autofix", "Aikido"},
 	{"snyk-bot", "Snyk"},
+	{"mend-for-github", "Mend"},
+	{"whitesource", "WhiteSource"},
+	{"gitguardian", "GitGuardian"},
+	{"socket-security", "Socket"},
+	{"sonatype-lift", "Sonatype Lift"},
+	{"step-security", "StepSecurity"},
+	{"stepsecurity-app", "StepSecurity"},
+	// Code-quality / review bots.
+	{"codecov", "Codecov"},
+	{"sonarcloud", "SonarCloud"},
+	{"sonarqubecloud", "SonarCloud"},
+	{"codacy-production", "Codacy"},
+	{"codacy-bot", "Codacy"},
+	{"deepsource", "DeepSource"},
+	{"lgtm-com", "LGTM"},
+	{"semgrep-app", "Semgrep"},
+	{"semgrep-bot", "Semgrep"},
+	{"coderabbitai", "CodeRabbit"},
+	{"sourcery-ai", "Sourcery"},
+	{"copilot-pull-request-reviewer", "Copilot PR Reviewer"},
+	// Misc.
+	{"sweep-ai", "Sweep"},
+	{"restyled-io", "Restyled"},
 	{"imgbot", "ImgBot"},
 	{"allcontributors", "AllContributors"},
-	{"semantic-release-bot", "semantic-release"},
-	{"copilot-pull-request-reviewer", "Copilot PR Reviewer"},
 }

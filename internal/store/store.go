@@ -84,7 +84,15 @@ var additiveColumns = []additiveColumn{
 	{"commits", "workspace", "TEXT NOT NULL DEFAULT ''"},
 	{"prs", "provider", "TEXT NOT NULL DEFAULT ''"},
 	{"prs", "workspace", "TEXT NOT NULL DEFAULT ''"},
+	{"prs", "author_login", "TEXT NOT NULL DEFAULT ''"},
+	{"prs", "author_is_bot", "INTEGER NOT NULL DEFAULT 0"},
 	{"tickets", "provider", "TEXT NOT NULL DEFAULT ''"},
+	// pr_commits gained author + message columns in v0.2 to support
+	// squash-merge trailer recovery — old databases were created with
+	// just (pr_id, commit_sha) before the table was used by ingest.
+	{"pr_commits", "author_email", "TEXT NOT NULL DEFAULT ''"},
+	{"pr_commits", "author_name", "TEXT NOT NULL DEFAULT ''"},
+	{"pr_commits", "message", "TEXT NOT NULL DEFAULT ''"},
 }
 
 func (s *Store) applyAdditiveColumns() error {

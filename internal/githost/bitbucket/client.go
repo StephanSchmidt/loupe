@@ -404,5 +404,10 @@ func prFromWire(raw prWire) githost.PullRequest {
 	// display name — downstream joins treat this column as an email.
 	_, email := emailFromRaw(raw.Author.Raw)
 	pr.AuthorEmail = email
+	// Bitbucket Cloud has no authoritative bot-type flag on PR authors and
+	// the user object on PRs doesn't expose a stable "login"; leave
+	// AuthorLogin empty and AuthorIsBot false. Bot detection on Bitbucket
+	// PRs falls through to email-substring rules (snyk-bot@snyk.io,
+	// bot@renovateapp.com, etc.) in internal/analyze/bots.go.
 	return pr
 }

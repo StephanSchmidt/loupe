@@ -77,11 +77,22 @@ type Commit struct {
 }
 
 // PullRequest is the neutral PR record.
+//
+// AuthorLogin is the host-side handle (GitHub login, Bitbucket nickname);
+// it carries the `[bot]` suffix for GitHub App identities and is the only
+// reliable bot signal we have on PR rows, since AuthorEmail is often blank
+// or, on GitHub, populated with the login as a fallback.
+//
+// AuthorIsBot is the host's authoritative bot flag — GitHub's REST API
+// labels App-bot users with `type: "Bot"`. Bitbucket Cloud has no
+// equivalent and always leaves this false.
 type PullRequest struct {
 	ID                string
 	Title             string
 	State             string // "OPEN" | "MERGED" | "DECLINED" | "SUPERSEDED"
 	AuthorEmail       string
+	AuthorLogin       string
+	AuthorIsBot       bool
 	SourceBranch      string
 	DestinationBranch string
 	CreatedAt         time.Time

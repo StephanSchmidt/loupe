@@ -122,6 +122,8 @@ type wirePR struct {
 	MergeCommitSHA string `json:"merge_commit_sha"`
 	User           *struct {
 		Login string `json:"login"`
+		// Type is "User" or "Bot" (App identities). Authoritative bot signal.
+		Type string `json:"type"`
 	} `json:"user"`
 	Labels []struct {
 		Name string `json:"name"`
@@ -369,7 +371,11 @@ func prFromWire(raw wirePR) githost.PullRequest {
 	if raw.User != nil {
 		// GitHub doesn't return author email on PR list; the login is the
 		// best identifier we have without an extra /users/{login} fetch.
+		// We also populate AuthorEmail with the login so legacy queries
+		// (and curated email-substring bot rules) keep working unchanged.
+		pr.AuthorLogin = raw.User.Login
 		pr.AuthorEmail = raw.User.Login
+		pr.AuthorIsBot = strings.EqualFold(raw.User.Type, "Bot")
 	}
 	for _, l := range raw.Labels {
 		pr.Labels = append(pr.Labels, l.Name)
