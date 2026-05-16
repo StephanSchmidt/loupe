@@ -56,7 +56,19 @@ func runStats(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = s.Close() }()
 
-	return WriteStats(cmd.Context(), s, out, threshold, override)
+	cycleCfg := loadCycleConfig(configPath)
+	return WriteStats(cmd.Context(), s, out, threshold, override, cycleCfg)
+}
+
+// loadCycleConfig pulls the dev-started status list out of loupe.yaml.
+// Empty list means cycle-time stats are skipped — `loupe stats` stays a
+// best-effort diagnostic when the config is missing or partial.
+func loadCycleConfig(path string) analyze.CycleConfig {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return analyze.CycleConfig{}
+	}
+	return analyze.CycleConfig{DevStartedStatuses: cfg.CycleTime.DevStartedStatuses}
 }
 
 // loadCutoverConfig returns the cutover threshold + override the same way
@@ -83,7 +95,7 @@ func loadCutoverConfig(path string) (threshold float64, override time.Time, _ er
 
 // WriteStats is the format-and-print path, separated from runStats so
 // tests can drive it against a seeded in-memory store.
-func WriteStats(ctx context.Context, s *store.Store, out io.Writer, threshold float64, override time.Time) error {
+func WriteStats(ctx context.Context, s *store.Store, out io.Writer, threshold float64, override time.Time, cycleCfg analyze.CycleConfig) error {
 	weeks, err := analyze.WeeklyStats(ctx, s)
 	if err != nil {
 		return err
@@ -124,7 +136,112 @@ func WriteStats(ctx context.Context, s *store.Store, out io.Writer, threshold fl
 	if cutover.Detected {
 		writeCutoverSplit(out, weeks, cutover)
 	}
+
+	if err := writeCycleTimeStats(ctx, s, out, cycleCfg, cutover); err != nil {
+		return err
+	}
 	return nil
+}
+
+// writeCycleTimeStats emits a per-ISO-week breakdown of idea→dev and
+// dev→release for tickets that completed in each week. Skipped when
+// there are no tickets with cycle data — keeps `loupe stats` useful on a
+// commit-only state.
+func writeCycleTimeStats(ctx context.Context, s *store.Store, out io.Writer, cfg analyze.CycleConfig, cutover analyze.Cutover) error {
+	weeks, err := analyze.WeeklyCycles(ctx, s, cfg)
+	if err != nil {
+		return err
+	}
+	if len(weeks) == 0 {
+		return nil
+	}
+	_, _ = fmt.Fprintln(out)
+	_, _ = fmt.Fprintf(out, "Cycle time (per ISO week of completion, %d weeks):\n", len(weeks))
+	totalTickets, fallbackTickets := 0, 0
+	for _, w := range weeks {
+		totalTickets += w.TicketCount
+		fallbackTickets += w.FallbackTicketCount
+	}
+	_, _ = fmt.Fprintf(out, "  %d tickets — %d via tracker transition, %d via first-commit fallback\n",
+		totalTickets, totalTickets-fallbackTickets, fallbackTickets)
+
+	cycles, err := analyze.ComputeCycles(ctx, s, cfg)
+	if err != nil {
+		return err
+	}
+	writeCycleSegmentRow(out, "  Idea → Dev    ", cyclesIdeaToDev(cycles))
+	writeCycleSegmentRow(out, "  Dev → Release ", cyclesDevToRelease(cycles))
+
+	if cutover.Detected {
+		writeCycleCutoverSplit(out, cycles, cutover)
+	}
+	return nil
+}
+
+func writeCycleSegmentRow(out io.Writer, label string, hours []float64) {
+	s, err := summarise(hours)
+	if err != nil {
+		_, _ = fmt.Fprintf(out, "%s  (n/a: %v)\n", label, err)
+		return
+	}
+	_, _ = fmt.Fprintf(out, "%s  median %s  p10 %s  p90 %s  min %s  max %s\n",
+		label, formatDays(s.median), formatDays(s.p10), formatDays(s.p90),
+		formatDays(s.min), formatDays(s.max))
+}
+
+func cyclesIdeaToDev(cs []analyze.TicketCycle) []float64 {
+	out := make([]float64, len(cs))
+	for i, c := range cs {
+		out[i] = c.IdeaToDev.Hours()
+	}
+	return out
+}
+
+func cyclesDevToRelease(cs []analyze.TicketCycle) []float64 {
+	out := make([]float64, len(cs))
+	for i, c := range cs {
+		out[i] = c.DevToRelease.Hours()
+	}
+	return out
+}
+
+func writeCycleCutoverSplit(out io.Writer, cycles []analyze.TicketCycle, c analyze.Cutover) {
+	var pre, post []analyze.TicketCycle
+	for _, cy := range cycles {
+		if cy.LastDevAt.Before(c.Date) {
+			pre = append(pre, cy)
+		} else {
+			post = append(post, cy)
+		}
+	}
+	_, _ = fmt.Fprintln(out, "  Cutover split (tickets completed before / after):")
+	writeCycleCohort(out, "    Before", pre)
+	writeCycleCohort(out, "    After ", post)
+}
+
+func writeCycleCohort(out io.Writer, label string, cs []analyze.TicketCycle) {
+	if len(cs) == 0 {
+		_, _ = fmt.Fprintf(out, "%s  (no tickets)\n", label)
+		return
+	}
+	idea, _ := stats.Float64Data(cyclesIdeaToDev(cs)).Median()
+	dev, _ := stats.Float64Data(cyclesDevToRelease(cs)).Median()
+	_, _ = fmt.Fprintf(out, "%s  (%3d tickets)  median Idea→Dev %s  median Dev→Release %s\n",
+		label, len(cs), formatDays(idea), formatDays(dev))
+}
+
+// formatDays renders an hours value as a days/hours string. Under 24h
+// shows as "Nh"; otherwise "Nd Hh" rounded to integer hours.
+func formatDays(hours float64) string {
+	if hours < 24 {
+		return fmt.Sprintf("%4.1fh", hours)
+	}
+	days := int(hours / 24)
+	rem := int(hours) % 24
+	if rem == 0 {
+		return fmt.Sprintf("%3dd", days)
+	}
+	return fmt.Sprintf("%3dd %2dh", days, rem)
 }
 
 // writeTrend reports the slope of a least-squares fit through the weekly

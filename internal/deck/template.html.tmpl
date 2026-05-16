@@ -232,6 +232,20 @@
   </aside>
 </section>
 
+{{ if .CyclesAvailable }}
+<section data-chart="cycle">
+  <h2>Cycle time</h2>
+  <div id="cycle-chart" class="chart"></div>
+  <p class="footnote">
+    {{ .CycleTickets }} tickets with cycle data — median Idea → Dev <span class="accent">{{ .MedianIdeaToDevText }}</span>, median Dev → Release <span class="accent">{{ .MedianDevToRelText }}</span>.
+    {{ printf "%.0f%%" .CycleFallbackPct }} of tickets used first-commit fallback (no matching tracker transition).
+  </p>
+  <aside class="notes">
+    Idea → Dev is ticket created → first tracker transition into a "dev started" status (or first commit, when no matching transition exists). Dev → Release is that moment → last commit on the ticket.
+  </aside>
+</section>
+{{ end }}
+
 <section>
   <h2>Methodology</h2>
   <div class="caveats">
@@ -281,6 +295,7 @@
   // verbatim via template.JS — JSON object literals are valid JS.
   const throughputOption = {{ .Charts.ThroughputJSON }};
   const adoptionOption = {{ .Charts.AdoptionJSON }};
+  {{ if .Charts.HasCycle }}const cycleOption = {{ .Charts.CycleJSON }};{{ end }}
 
   // Cutover indices come alongside the option payloads. The cutover
   // marker is drawn as a `graphic` overlay (see overlayCutover below)
@@ -289,10 +304,12 @@
   const chartOptions = {
     throughput: throughputOption,
     adoption: adoptionOption,
+    {{ if .Charts.HasCycle }}cycle: cycleOption,{{ end }}
   };
   const cutoverIdx = {
     throughput: {{ .Charts.ThroughputCutoverIdx }},
     adoption: {{ .Charts.AdoptionCutoverIdx }},
+    {{ if .Charts.HasCycle }}cycle: {{ .Charts.CycleCutoverIdx }},{{ end }}
   };
   const chartInstances = {};
 

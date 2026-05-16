@@ -59,6 +59,9 @@ func IngestTracker(ctx context.Context, s *store.Store, t tracker.Tracker, progr
 			if err := upsertIssue(ctx, s.DB(), provider, iss); err != nil {
 				return stats, err
 			}
+			if err := upsertTicketTransitions(ctx, s.DB(), iss); err != nil {
+				return stats, err
+			}
 			nIssues++
 		}
 		stats.Issues += nIssues
@@ -152,6 +155,36 @@ func upsertIssue(ctx context.Context, db *sql.DB, provider string, iss tracker.I
 	)
 	if err != nil {
 		return fmt.Errorf("upsert issue %s: %w", id, err)
+	}
+	return nil
+}
+
+const upsertTicketTransitionSQL = `
+INSERT INTO ticket_transitions (ticket_id, at, from_status, to_status)
+VALUES (?, ?, ?, ?)
+ON CONFLICT(ticket_id, at, to_status) DO UPDATE SET
+    from_status = excluded.from_status
+`
+
+// upsertTicketTransitions persists each status change emitted by the
+// tracker. Idempotent — the (ticket_id, at, to_status) primary key
+// already deduplicates re-ingests.
+func upsertTicketTransitions(ctx context.Context, db *sql.DB, iss tracker.Issue) error {
+	if len(iss.Transitions) == 0 {
+		return nil
+	}
+	id := iss.Key
+	if id == "" {
+		id = iss.ID
+	}
+	for _, tr := range iss.Transitions {
+		if tr.At.IsZero() {
+			continue
+		}
+		if _, err := db.ExecContext(ctx, upsertTicketTransitionSQL,
+			id, tr.At.Unix(), tr.FromStatus, tr.ToStatus); err != nil {
+			return fmt.Errorf("upsert transition %s @ %s: %w", id, tr.At, err)
+		}
 	}
 	return nil
 }

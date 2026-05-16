@@ -38,8 +38,17 @@ type Config struct {
 	Tracker    TrackerConfig    `yaml:"tracker"`
 	Teams      []TeamConfig     `yaml:"teams"`
 	AIAdoption AIAdoptionConfig `yaml:"ai_adoption"`
+	CycleTime  CycleTimeConfig  `yaml:"cycle_time"`
 	Windows    WindowsConfig    `yaml:"windows"`
 	Output     OutputConfig     `yaml:"output"`
+}
+
+// CycleTimeConfig drives the idea→dev→release cycle-time charts. The
+// status names are matched case-insensitively against tracker
+// transitions; falling back to the first commit on a ticket when no
+// matching transition is found.
+type CycleTimeConfig struct {
+	DevStartedStatuses []string `yaml:"dev_started_statuses"`
 }
 
 // GitHostConfig holds non-secret coordinates for the git host. The token is
@@ -138,6 +147,11 @@ func (c *Config) applyDefaults() {
 	if c.AIAdoption.Detection.SquashMergeRecovery == nil {
 		t := true
 		c.AIAdoption.Detection.SquashMergeRecovery = &t
+	}
+	if len(c.CycleTime.DevStartedStatuses) == 0 {
+		c.CycleTime.DevStartedStatuses = []string{
+			"In Progress", "In Development", "In Review", "Code Review",
+		}
 	}
 	if c.Windows.BaselineWeeks == 0 {
 		c.Windows.BaselineWeeks = defaultBaselineWeeks

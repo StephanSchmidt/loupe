@@ -221,6 +221,75 @@ func TestListIssues_SinceFilterUsesAccountTimezone(t *testing.T) {
 	}
 }
 
+func TestListIssues_ExpandsChangelogAndFlattensTransitions(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("expand"); got != "changelog" {
+			t.Errorf("expected expand=changelog, got %q", got)
+		}
+		// Jira returns histories newest-first; the parser flips them to
+		// oldest-first.
+		mustJSON(t, w, map[string]any{
+			"issues": []map[string]any{
+				{
+					"id":  "ENG-1-id",
+					"key": "ENG-1",
+					"fields": map[string]any{
+						"summary":   "Fix login",
+						"issuetype": map[string]any{"name": "Bug"},
+						"status":    map[string]any{"name": "Done"},
+						"created":   "2026-05-01T10:00:00.000+0000",
+						"project":   map[string]any{"key": "ENG"},
+					},
+					"changelog": map[string]any{
+						"histories": []map[string]any{
+							// newest
+							{
+								"created": "2026-05-05T11:00:00.000+0000",
+								"items": []map[string]any{
+									{"field": "status", "fromString": "In Progress", "toString": "Done"},
+								},
+							},
+							{
+								"created": "2026-05-03T09:00:00.000+0000",
+								"items": []map[string]any{
+									{"field": "assignee", "fromString": "", "toString": "alice"},
+									{"field": "status", "fromString": "To Do", "toString": "In Progress"},
+								},
+							},
+						},
+					},
+				},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+	var got []tracker.Issue
+	for iss, err := range c.ListIssues(context.Background(), "ENG", time.Time{}) {
+		if err != nil {
+			t.Fatalf("stream: %v", err)
+		}
+		got = append(got, iss)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d issues, want 1", len(got))
+	}
+	tx := got[0].Transitions
+	if len(tx) != 2 {
+		t.Fatalf("got %d status transitions, want 2 (status-only, oldest-first): %+v", len(tx), tx)
+	}
+	if tx[0].ToStatus != "In Progress" || tx[0].FromStatus != "To Do" {
+		t.Errorf("first transition = %+v, want To Do → In Progress", tx[0])
+	}
+	if tx[1].ToStatus != "Done" || tx[1].FromStatus != "In Progress" {
+		t.Errorf("second transition = %+v, want In Progress → Done", tx[1])
+	}
+	if !tx[0].At.Before(tx[1].At) {
+		t.Errorf("transitions not oldest-first: %v then %v", tx[0].At, tx[1].At)
+	}
+}
+
 func TestName(t *testing.T) {
 	c, err := NewWithBaseURL("https://x", "a@a", "t")
 	if err != nil {

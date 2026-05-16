@@ -24,10 +24,11 @@ const (
 // Adding "jpg" here would extend coverage without further code changes.
 var staticChartFormats = []string{"png", "svg"}
 
-// RenderStaticCharts writes throughput and adoption charts under chartsDir
-// in every format in staticChartFormats. PNG is the paste-into-Slack
-// default; SVG is for high-resolution embedding.
-func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, chartsDir string) error {
+// RenderStaticCharts writes throughput, adoption, and (when cycle data
+// is available) cycle charts under chartsDir in every format in
+// staticChartFormats. PNG is the paste-into-Slack default; SVG is for
+// high-resolution embedding.
+func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, chartsDir string) error {
 	if len(weeks) == 0 {
 		return fmt.Errorf("RenderStaticCharts: no weekly data")
 	}
@@ -43,6 +44,13 @@ func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, char
 		adopt := filepath.Join(chartsDir, "adoption."+format)
 		if err := renderStaticAdoption(weeks, cutover, adopt, format); err != nil {
 			return fmt.Errorf("adoption %s: %w", format, err)
+		}
+		if len(cycles) == 0 {
+			continue
+		}
+		cycle := filepath.Join(chartsDir, "cycle."+format)
+		if err := renderStaticCycle(cycles, cutover, cycle, format); err != nil {
+			return fmt.Errorf("cycle %s: %w", format, err)
 		}
 	}
 	return nil
@@ -107,6 +115,53 @@ func renderStaticAdoption(weeks []analyze.WeekStats, cutover analyze.Cutover, ou
 	})
 	if err := p.LineChart(opt); err != nil {
 		return fmt.Errorf("line chart: %w", err)
+	}
+	return writeStaticChart(p, outPath)
+}
+
+func renderStaticCycle(cycles []analyze.WeekCycle, cutover analyze.Cutover, outPath, format string) error {
+	labels := make([]string, len(cycles))
+	idea := make([]float64, len(cycles))
+	dev := make([]float64, len(cycles))
+	cutoverIdx := -1
+	prevYear := 0
+	for i, c := range cycles {
+		layout := "Jan 02"
+		if c.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = c.WeekStart.Format(layout)
+		prevYear = c.WeekStart.Year()
+		idea[i] = c.MedianIdeaToDev.Hours() / 24
+		dev[i] = c.MedianDevToRelease.Hours() / 24
+		if cutover.Detected && c.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+	}
+	if cutoverIdx >= 0 {
+		labels[cutoverIdx] = "▼ " + labels[cutoverIdx]
+	}
+
+	opt := charts.NewBarChartOptionWithData([][]float64{dev, idea})
+	opt.StackSeries = charts.Ptr(true)
+	opt.Title = charts.TitleOption{Text: "Cycle time per week (median days)"}
+	if cutover.Detected {
+		opt.Title.Subtext = fmt.Sprintf("AI adoption cutover: %s (%s)",
+			cutover.Date.Format("Jan 2, 2006"), cutover.Reason)
+	}
+	opt.CategoryAxis = charts.CategoryAxisOption{
+		Labels:        labels,
+		LabelRotation: charts.DegreesToRadians(45),
+	}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"Dev → Release", "Idea → Dev"}}
+
+	p := charts.NewPainter(charts.PainterOptions{
+		Width:        staticChartWidth,
+		Height:       staticChartHeight,
+		OutputFormat: format,
+	})
+	if err := p.BarChart(opt); err != nil {
+		return fmt.Errorf("bar chart: %w", err)
 	}
 	return writeStaticChart(p, outPath)
 }

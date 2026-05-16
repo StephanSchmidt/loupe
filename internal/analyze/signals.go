@@ -101,9 +101,9 @@ func DetectFromMessage(message string) []Signal {
 // "gemini-code-assist" must win over a future plain "gemini" entry);
 // keep the most specific tokens earlier.
 type trailerRule struct {
-	source       string
-	nameTokens   []string
-	emailTokens  []string
+	source        string
+	nameTokens    []string
+	emailTokens   []string
 	emailPrefixes []string
 }
 

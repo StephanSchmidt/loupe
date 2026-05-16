@@ -91,7 +91,13 @@ func renderFromStore(ctx context.Context, out io.Writer, cfg *config.Config, s *
 	if err := os.MkdirAll(filepath.Dir(deckDir), 0o750); err != nil {
 		return fmt.Errorf("create reports dir: %w", err)
 	}
-	if err := deck.RenderDeck(deckDir, cfg, weeks, cutover, time.Now().UTC()); err != nil {
+	cycles, err := analyze.WeeklyCycles(ctx, s, analyze.CycleConfig{
+		DevStartedStatuses: cfg.CycleTime.DevStartedStatuses,
+	})
+	if err != nil {
+		return fmt.Errorf("weekly cycles: %w", err)
+	}
+	if err := deck.RenderDeck(deckDir, cfg, weeks, cutover, cycles, time.Now().UTC()); err != nil {
 		return fmt.Errorf("render deck: %w", err)
 	}
 	_, _ = fmt.Fprintf(out, "Deck ready: %s/index.html\n", deckDir)

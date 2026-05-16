@@ -67,7 +67,17 @@ func run() error {
 	}
 	fmt.Println(indent(statusOut))
 
+	fmt.Println("==> Running loupe stats")
+	statsOut, err := runCmd(workDir, loupeBin, "stats", "--config", cfgPath)
+	if err != nil {
+		return fmt.Errorf("stats failed:\n%s\n%w", statsOut, err)
+	}
+	fmt.Println(indent(statsOut))
+
 	if err := assertStatus(statusOut); err != nil {
+		return err
+	}
+	if err := assertStats(statsOut); err != nil {
 		return err
 	}
 	if err := assertDeck(workDir); err != nil {
@@ -110,6 +120,8 @@ ai_adoption:
   detection:
     co_author_trailers: true
   min_weekly_commits_for_cutover: 0.10
+cycle_time:
+  dev_started_statuses: [In Progress]
 output:
   path: ./reports
 `
@@ -139,6 +151,10 @@ func assertStatus(out string) error {
 		// pr_label code path is covered by unit tests in analyze.
 		"Branch names:",
 		"Squash recovery:",
+		// v0.3 cycle-time: ticket linking + transition ingest.
+		"Cycle:",
+		"tickets linked to commits",
+		"status transitions recorded",
 	} {
 		if !strings.Contains(out, want) {
 			return fmt.Errorf("status missing %q", want)
@@ -146,6 +162,22 @@ func assertStatus(out string) error {
 	}
 	if !strings.Contains(out, "AI-tagged, ") {
 		return fmt.Errorf("status missing AI tagged percentage")
+	}
+	return nil
+}
+
+// assertStats locks in that `loupe stats` produces a cycle-time section
+// when ticket data is present.
+func assertStats(out string) error {
+	for _, want := range []string{
+		"Cycle time",
+		"Idea → Dev",
+		"Dev → Release",
+		"via tracker transition",
+	} {
+		if !strings.Contains(out, want) {
+			return fmt.Errorf("stats missing %q", want)
+		}
 	}
 	return nil
 }
@@ -165,6 +197,8 @@ func assertDeck(workDir string) error {
 		"assets/echarts.min.js",
 		"charts/throughput.png",
 		"charts/throughput.svg",
+		"charts/cycle.png",
+		"charts/cycle.svg",
 		"charts/adoption.png",
 		"charts/adoption.svg",
 	} {
@@ -268,9 +302,16 @@ func fakeCommits(path string) []map[string]any {
 	}
 	now := time.Now().UTC()
 	out := make([]map[string]any, 0, 12)
+	// ticketKeys cycles ticket references through the first few commits so
+	// LinkCommitsToTickets has something to match against. ENG-1 and OPS-1
+	// are seeded by fakeIssues; the rest stay reference-free.
+	ticketKeys := []string{"ENG-1", "OPS-1", "ENG-2"}
 	for i := 0; i < 12; i++ {
 		when := now.AddDate(0, 0, -7*i)
 		msg := "chore: routine change " + repoTag
+		if i < len(ticketKeys) {
+			msg = ticketKeys[i] + " " + msg
+		}
 		if i < 5 {
 			msg += "\n\nCo-Authored-By: Claude <noreply@anthropic.com>"
 		}
@@ -365,6 +406,27 @@ func fakeIssues(jql string) []map[string]any {
 	now := time.Now().UTC()
 	for i := 0; i < 8; i++ {
 		when := now.AddDate(0, 0, -3*i)
+		// Add a status changelog so cycle-time can detect dev_started via
+		// a tracker transition. "In Progress" lands one day after creation.
+		inProgressAt := when.Add(24 * time.Hour)
+		doneAt := when.Add(48 * time.Hour)
+		changelog := map[string]any{
+			"histories": []map[string]any{
+				// newest-first per Jira conventions
+				{
+					"created": doneAt.Format("2006-01-02T15:04:05.000-0700"),
+					"items": []map[string]any{
+						{"field": "status", "fromString": "In Progress", "toString": "Done"},
+					},
+				},
+				{
+					"created": inProgressAt.Format("2006-01-02T15:04:05.000-0700"),
+					"items": []map[string]any{
+						{"field": "status", "fromString": "To Do", "toString": "In Progress"},
+					},
+				},
+			},
+		}
 		out = append(out, map[string]any{
 			"id":  fmt.Sprintf("%s-id-%d", projectKey, i),
 			"key": fmt.Sprintf("%s-%d", projectKey, i+1),
@@ -378,6 +440,7 @@ func fakeIssues(jql string) []map[string]any {
 				"project":        map[string]any{"key": projectKey},
 				"timeestimate":   3600,
 			},
+			"changelog": changelog,
 		})
 	}
 	return out

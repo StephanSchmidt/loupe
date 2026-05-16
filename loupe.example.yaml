@@ -39,6 +39,13 @@ ai_adoption:
     branch_prefixes: ["copilot/", "cursor/", "claude/", "aider/", "devin/", "jules/"]
   min_weekly_commits_for_cutover: 0.05
 
+cycle_time:
+  # Tracker status names (case-insensitive) that mark "development started".
+  # The first transition INTO any of these defines idea→dev. Tickets without
+  # a matching transition fall back to the timestamp of their first linked
+  # commit.
+  dev_started_statuses: [In Progress, In Development, In Review, Code Review]
+
 windows:
   baseline_weeks: 12
   comparison_weeks: 12

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/StephanSchmidt/loupe/internal/analyze"
 	"github.com/StephanSchmidt/loupe/internal/store"
 )
 
@@ -97,7 +98,7 @@ func TestWriteStats_FullSeries(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	var buf bytes.Buffer
-	if err := WriteStats(context.Background(), s, &buf, 0.05, time.Time{}); err != nil {
+	if err := WriteStats(context.Background(), s, &buf, 0.05, time.Time{}, analyze.CycleConfig{}); err != nil {
 		t.Fatalf("WriteStats: %v", err)
 	}
 	out := buf.String()
@@ -162,7 +163,7 @@ func TestWriteStats_OverrideCutover(t *testing.T) {
 
 	override := time.Date(2026, 1, 12, 0, 0, 0, 0, time.UTC)
 	var buf bytes.Buffer
-	if err := WriteStats(context.Background(), s, &buf, 0.05, override); err != nil {
+	if err := WriteStats(context.Background(), s, &buf, 0.05, override, analyze.CycleConfig{}); err != nil {
 		t.Fatalf("WriteStats: %v", err)
 	}
 	out := buf.String()
@@ -183,7 +184,7 @@ func TestWriteStats_EmptyStore(t *testing.T) {
 	defer func() { _ = s.Close() }()
 
 	var buf bytes.Buffer
-	if err := WriteStats(context.Background(), s, &buf, 0.05, time.Time{}); err != nil {
+	if err := WriteStats(context.Background(), s, &buf, 0.05, time.Time{}, analyze.CycleConfig{}); err != nil {
 		t.Fatalf("WriteStats: %v", err)
 	}
 	if !strings.Contains(buf.String(), "No weekly data yet") {

@@ -211,7 +211,7 @@ func runPipeline(ctx context.Context, opts *baselineOpts, gh githost.GitHost, tr
 	if err != nil {
 		return err
 	}
-	return renderAndAnnounce(opts, weeks, cutover, s)
+	return renderAndAnnounce(ctx, opts, weeks, cutover, s)
 }
 
 func runIngest(ctx context.Context, opts *baselineOpts, s *store.Store, gh githost.GitHost, trk tracker.Tracker) error {
@@ -286,15 +286,20 @@ func logCutover(out io.Writer, c analyze.Cutover) {
 	}
 }
 
-func renderAndAnnounce(opts *baselineOpts, weeks []analyze.WeekStats, cutover analyze.Cutover, s *store.Store) error {
-	_ = s // reserved for future store-derived metadata in the deck (e.g. scope text)
+func renderAndAnnounce(ctx context.Context, opts *baselineOpts, weeks []analyze.WeekStats, cutover analyze.Cutover, s *store.Store) error {
+	cycles, err := analyze.WeeklyCycles(ctx, s, analyze.CycleConfig{
+		DevStartedStatuses: opts.cfg.CycleTime.DevStartedStatuses,
+	})
+	if err != nil {
+		return fmt.Errorf("weekly cycles: %w", err)
+	}
 
 	runID := time.Now().UTC().Format("2006-01-02T15-04-05Z")
 	deckDir := filepath.Join(opts.cfg.Output.Path, runID)
 	if err := os.MkdirAll(filepath.Dir(deckDir), 0o750); err != nil {
 		return fmt.Errorf("create reports dir: %w", err)
 	}
-	if err := deck.RenderDeck(deckDir, opts.cfg, weeks, cutover, time.Now().UTC()); err != nil {
+	if err := deck.RenderDeck(deckDir, opts.cfg, weeks, cutover, cycles, time.Now().UTC()); err != nil {
 		return fmt.Errorf("render deck: %w", err)
 	}
 	_, _ = fmt.Fprintf(opts.out, "\nDeck ready: %s/index.html\n", deckDir)

@@ -49,7 +49,7 @@ func TestBuildChartPayload_ThroughputShape(t *testing.T) {
 	weeks := sampleWeeks()
 	cutover := sampleCutover(weeks)
 
-	got, err := BuildChartPayload(weeks, cutover)
+	got, err := BuildChartPayload(weeks, cutover, nil)
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
@@ -98,7 +98,7 @@ func TestBuildChartPayload_AdoptionShape(t *testing.T) {
 	weeks := sampleWeeks()
 	cutover := sampleCutover(weeks)
 
-	got, err := BuildChartPayload(weeks, cutover)
+	got, err := BuildChartPayload(weeks, cutover, nil)
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
@@ -128,7 +128,7 @@ func TestBuildChartPayload_AdoptionShape(t *testing.T) {
 
 func TestBuildChartPayload_NoCutoverSignalsAbsence(t *testing.T) {
 	weeks := sampleWeeks()
-	got, err := BuildChartPayload(weeks, analyze.Cutover{Detected: false})
+	got, err := BuildChartPayload(weeks, analyze.Cutover{Detected: false}, nil)
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
@@ -144,7 +144,69 @@ func TestBuildChartPayload_NoCutoverSignalsAbsence(t *testing.T) {
 }
 
 func TestBuildChartPayload_NoData(t *testing.T) {
-	if _, err := BuildChartPayload(nil, analyze.Cutover{}); err == nil {
+	if _, err := BuildChartPayload(nil, analyze.Cutover{}, nil); err == nil {
 		t.Errorf("expected error for empty weeks, got nil")
+	}
+}
+
+func sampleCycles() []analyze.WeekCycle {
+	base := time.Date(2026, 4, 6, 0, 0, 0, 0, time.UTC)
+	out := make([]analyze.WeekCycle, 3)
+	for i := range out {
+		out[i] = analyze.WeekCycle{
+			WeekStart:           base.AddDate(0, 0, 7*i),
+			TicketCount:         5,
+			FallbackTicketCount: 1,
+			MedianIdeaToDev:     time.Duration(i+1) * 24 * time.Hour,
+			MedianDevToRelease:  time.Duration(i+2) * 24 * time.Hour,
+			P10IdeaToDev:        12 * time.Hour,
+			P90IdeaToDev:        48 * time.Hour,
+			P10DevToRelease:     24 * time.Hour,
+			P90DevToRelease:     96 * time.Hour,
+		}
+	}
+	return out
+}
+
+func TestBuildChartPayload_CycleShape(t *testing.T) {
+	weeks := sampleWeeks()
+	cutover := sampleCutover(weeks)
+	cycles := sampleCycles()
+
+	got, err := BuildChartPayload(weeks, cutover, cycles)
+	if err != nil {
+		t.Fatalf("BuildChartPayload: %v", err)
+	}
+	if !got.HasCycle {
+		t.Fatal("expected HasCycle=true when cycles supplied")
+	}
+	if got.CycleJSON == "" {
+		t.Fatal("expected CycleJSON to be populated")
+	}
+
+	opt := decodeOption(t, string(got.CycleJSON))
+	series, _ := opt["series"].([]any)
+	if len(series) != 2 {
+		t.Fatalf("expected 2 stacked cycle series (Dev→Release, Idea→Dev), got %d", len(series))
+	}
+	if !strings.Contains(string(got.CycleJSON), "Idea") {
+		t.Errorf("CycleJSON missing 'Idea': %s", got.CycleJSON)
+	}
+	if !strings.Contains(string(got.CycleJSON), "Release") {
+		t.Errorf("CycleJSON missing 'Release': %s", got.CycleJSON)
+	}
+}
+
+func TestBuildChartPayload_NoCycleWhenNil(t *testing.T) {
+	weeks := sampleWeeks()
+	got, err := BuildChartPayload(weeks, sampleCutover(weeks), nil)
+	if err != nil {
+		t.Fatalf("BuildChartPayload: %v", err)
+	}
+	if got.HasCycle {
+		t.Error("expected HasCycle=false when cycles is nil")
+	}
+	if got.CycleCutoverIdx != -1 {
+		t.Errorf("CycleCutoverIdx = %d, want -1", got.CycleCutoverIdx)
 	}
 }

@@ -20,8 +20,11 @@ import (
 type ChartPayload struct {
 	ThroughputJSON       template.JS
 	AdoptionJSON         template.JS
+	CycleJSON            template.JS // empty when no ticket cycle data
+	HasCycle             bool
 	ThroughputCutoverIdx int // -1 if no cutover detected
 	AdoptionCutoverIdx   int
+	CycleCutoverIdx      int
 }
 
 // Dark-theme palette — kept in sync with template.html.tmpl's CSS vars.
@@ -43,7 +46,7 @@ const (
 // BuildChartPayload prepares the ECharts option payloads for the deck. The
 // rendered template hands these to echarts.init().setOption() in the
 // browser. The Go side does no PNG rasterisation.
-func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover) (ChartPayload, error) {
+func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle) (ChartPayload, error) {
 	if len(weeks) == 0 {
 		return ChartPayload{}, fmt.Errorf("BuildChartPayload: no weekly data")
 	}
@@ -60,12 +63,29 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover) (Char
 	// break out of the enclosing <script>. No untrusted JS lives in either
 	// option map (only numbers, ECharts keywords, and time-formatted
 	// strings), so the template.JS conversion is safe here.
-	return ChartPayload{
+	out := ChartPayload{
 		ThroughputJSON:       template.JS(thru),  // #nosec G203 -- JSON-encoded payload, see comment above
 		AdoptionJSON:         template.JS(adopt), // #nosec G203 -- JSON-encoded payload, see comment above
 		ThroughputCutoverIdx: cutoverIdx,
 		AdoptionCutoverIdx:   cutoverIdx,
-	}, nil
+		CycleCutoverIdx:      -1,
+	}
+	if len(cycles) > 0 {
+		cycle, idx, err := marshalCycleOption(cycles, cutover)
+		if err != nil {
+			return ChartPayload{}, fmt.Errorf("marshal cycle option: %w", err)
+		}
+		out.CycleJSON = template.JS(cycle) // #nosec G203 -- JSON-encoded payload
+		out.CycleCutoverIdx = idx
+		out.HasCycle = true
+	}
+	return out, nil
+}
+
+func marshalCycleOption(cycles []analyze.WeekCycle, cutover analyze.Cutover) ([]byte, int, error) {
+	opt, idx := buildCycleOption(cycles, cutover)
+	b, err := json.Marshal(opt)
+	return b, idx, err
 }
 
 func marshalOption(opt map[string]any) ([]byte, error) {
@@ -165,6 +185,56 @@ func buildAdoptionOption(weeks []analyze.WeekStats, cutover analyze.Cutover) map
 	})
 	opt["series"] = []map[string]any{series}
 	return opt
+}
+
+// buildCycleOption produces the ECharts option for the per-week
+// cycle-time stacked bar. Idea→Dev is the top segment (drawn second in
+// the stack so the legend reads top-down) and Dev→Release is the
+// bottom. Values are days (float, rounded to one decimal in the
+// tooltip). Returns the cutover index for the overlay (-1 if none).
+func buildCycleOption(cycles []analyze.WeekCycle, cutover analyze.Cutover) (map[string]any, int) {
+	labels := make([]string, len(cycles))
+	idea := make([]float64, len(cycles))
+	dev := make([]float64, len(cycles))
+	cutoverIdx := -1
+	prevYear := 0
+	for i, c := range cycles {
+		layout := "Jan 02"
+		if c.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = c.WeekStart.Format(layout)
+		prevYear = c.WeekStart.Year()
+		idea[i] = roundTo1(c.MedianIdeaToDev.Hours() / 24)
+		dev[i] = roundTo1(c.MedianDevToRelease.Hours() / 24)
+		if cutover.Detected && c.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+	}
+
+	devSeries := map[string]any{
+		"name": "Dev → Release", "type": "bar", "stack": "cycle", "data": dev,
+		"itemStyle": map[string]any{"borderRadius": []int{0, 0, 0, 0}},
+	}
+	ideaSeries := map[string]any{
+		"name": "Idea → Dev", "type": "bar", "stack": "cycle", "data": idea,
+		"itemStyle": map[string]any{"borderRadius": []int{3, 3, 0, 0}},
+	}
+
+	opt := darkChartBase("Cycle time per week (median days)", cutover)
+	opt["color"] = []string{chartAccent2, chartAccent}
+	opt["legend"] = darkLegend([]string{"Dev → Release", "Idea → Dev"})
+	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
+	opt["xAxis"] = darkCategoryAxis(labels)
+	opt["yAxis"] = darkValueAxis(map[string]any{
+		"axisLabel": map[string]any{"formatter": "{value} d", "color": chartMuted},
+	})
+	opt["series"] = []map[string]any{devSeries, ideaSeries}
+	return opt, cutoverIdx
+}
+
+func roundTo1(f float64) float64 {
+	return float64(int(f*10+0.5)) / 10
 }
 
 // axisLabelsAndCutover returns one axis label per week plus the index of

@@ -48,7 +48,7 @@ func TestRenderStaticCharts_ProducesPngAndSvg(t *testing.T) {
 	cutover := sampleCutover(weeks)
 	dir := t.TempDir()
 
-	if err := RenderStaticCharts(weeks, cutover, dir); err != nil {
+	if err := RenderStaticCharts(weeks, cutover, nil, dir); err != nil {
 		t.Fatalf("RenderStaticCharts: %v", err)
 	}
 
@@ -62,7 +62,7 @@ func TestRenderStaticCharts_NoCutover(t *testing.T) {
 	weeks := sampleWeeks()
 	dir := t.TempDir()
 
-	if err := RenderStaticCharts(weeks, analyze.Cutover{Detected: false}, dir); err != nil {
+	if err := RenderStaticCharts(weeks, analyze.Cutover{Detected: false}, nil, dir); err != nil {
 		t.Fatalf("RenderStaticCharts without cutover: %v", err)
 	}
 	assertPNG(t, filepath.Join(dir, "throughput.png"))
@@ -70,7 +70,20 @@ func TestRenderStaticCharts_NoCutover(t *testing.T) {
 }
 
 func TestRenderStaticCharts_NoData(t *testing.T) {
-	if err := RenderStaticCharts(nil, analyze.Cutover{}, t.TempDir()); err == nil {
+	if err := RenderStaticCharts(nil, analyze.Cutover{}, nil, t.TempDir()); err == nil {
 		t.Errorf("expected error for empty weeks, got nil")
 	}
+}
+
+func TestRenderStaticCharts_EmitsCycleWhenSupplied(t *testing.T) {
+	weeks := sampleWeeks()
+	cutover := sampleCutover(weeks)
+	cycles := sampleCycles()
+	dir := t.TempDir()
+
+	if err := RenderStaticCharts(weeks, cutover, cycles, dir); err != nil {
+		t.Fatalf("RenderStaticCharts with cycle: %v", err)
+	}
+	assertPNG(t, filepath.Join(dir, "cycle.png"))
+	assertSVG(t, filepath.Join(dir, "cycle.svg"))
 }

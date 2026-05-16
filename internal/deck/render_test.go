@@ -21,7 +21,7 @@ func TestRenderDeck_ProducesAllArtifacts(t *testing.T) {
 	reportDate := time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC)
 
 	dir := t.TempDir()
-	if err := RenderDeck(dir, cfg, weeks, cutover, reportDate); err != nil {
+	if err := RenderDeck(dir, cfg, weeks, cutover, nil, reportDate); err != nil {
 		t.Fatalf("RenderDeck: %v", err)
 	}
 
@@ -82,6 +82,49 @@ func TestRenderDeck_ProducesAllArtifacts(t *testing.T) {
 	}
 }
 
+func TestRenderDeck_IncludesCycleSlideWhenCyclesPresent(t *testing.T) {
+	cfg := &config.Config{
+		Org:     "acme-eng",
+		GitHost: config.GitHostConfig{Provider: config.ProviderBitbucketCloud},
+	}
+	weeks := sampleWeeks()
+	cutover := sampleCutover(weeks)
+	cycles := sampleCycles()
+	reportDate := time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC)
+
+	dir := t.TempDir()
+	if err := RenderDeck(dir, cfg, weeks, cutover, cycles, reportDate); err != nil {
+		t.Fatalf("RenderDeck: %v", err)
+	}
+
+	html, err := os.ReadFile(filepath.Join(dir, "index.html"))
+	if err != nil {
+		t.Fatalf("read index.html: %v", err)
+	}
+	body := string(html)
+	for _, want := range []string{
+		`id="cycle-chart"`,
+		"Cycle time",
+		"Idea → Dev",
+		"Dev → Release",
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("expected %q on rendered deck", want)
+		}
+	}
+
+	for _, rel := range []string{"charts/cycle.png", "charts/cycle.svg"} {
+		info, err := os.Stat(filepath.Join(dir, rel))
+		if err != nil {
+			t.Errorf("missing %s: %v", rel, err)
+			continue
+		}
+		if info.Size() == 0 {
+			t.Errorf("%s is empty", rel)
+		}
+	}
+}
+
 func TestRenderDeck_NoCutoverDetected(t *testing.T) {
 	cfg := &config.Config{
 		Org:     "acme-eng",
@@ -92,7 +135,7 @@ func TestRenderDeck_NoCutoverDetected(t *testing.T) {
 	reportDate := time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC)
 
 	dir := t.TempDir()
-	if err := RenderDeck(dir, cfg, weeks, cutover, reportDate); err != nil {
+	if err := RenderDeck(dir, cfg, weeks, cutover, nil, reportDate); err != nil {
 		t.Fatalf("RenderDeck: %v", err)
 	}
 	html, err := os.ReadFile(filepath.Join(dir, "index.html"))

@@ -42,6 +42,15 @@ type DeckData struct {
 	CutoverText         string
 	CutoverThresholdPct float64
 	Charts              ChartPayload
+
+	// Cycles is populated when ticket data is available; the template
+	// hides the cycle slide when CyclesAvailable is false.
+	Cycles              []analyze.WeekCycle
+	CyclesAvailable     bool
+	CycleTickets        int
+	CycleFallbackPct    float64
+	MedianIdeaToDevText string
+	MedianDevToRelText  string
 }
 
 // RenderDeck writes a self-contained reveal.js deck under deckDir:
@@ -66,6 +75,7 @@ func RenderDeck(
 	cfg *config.Config,
 	weeks []analyze.WeekStats,
 	cutover analyze.Cutover,
+	cycles []analyze.WeekCycle,
 	reportDate time.Time,
 ) error {
 	if err := os.MkdirAll(deckDir, 0o750); err != nil {
@@ -76,16 +86,16 @@ func RenderDeck(
 		return err
 	}
 
-	payload, err := BuildChartPayload(weeks, cutover)
+	payload, err := BuildChartPayload(weeks, cutover, cycles)
 	if err != nil {
 		return fmt.Errorf("build chart payload: %w", err)
 	}
 
-	if err := RenderStaticCharts(weeks, cutover, filepath.Join(deckDir, "charts")); err != nil {
+	if err := RenderStaticCharts(weeks, cutover, cycles, filepath.Join(deckDir, "charts")); err != nil {
 		return fmt.Errorf("render static charts: %w", err)
 	}
 
-	data := buildDeckData(cfg, weeks, cutover, reportDate)
+	data := buildDeckData(cfg, weeks, cutover, cycles, reportDate)
 	data.Charts = payload
 	tmpl, err := template.New("deck").Parse(deckTemplate)
 	if err != nil {
@@ -109,6 +119,7 @@ func buildDeckData(
 	cfg *config.Config,
 	weeks []analyze.WeekStats,
 	cutover analyze.Cutover,
+	cycles []analyze.WeekCycle,
 	reportDate time.Time,
 ) DeckData {
 	d := DeckData{
@@ -118,6 +129,12 @@ func buildDeckData(
 		Weeks:               weeks,
 		Cutover:             cutover,
 		CutoverThresholdPct: cutover.Threshold * 100,
+		Cycles:              cycles,
+		CyclesAvailable:     len(cycles) > 0,
+	}
+
+	if len(cycles) > 0 {
+		populateCycleSummary(&d, cycles)
 	}
 
 	// Over-window distinct-author counts would need raw commit data; for v0 we
@@ -155,6 +172,35 @@ func buildDeckData(
 		d.CutoverText = "No AI cutover detected in this window — adoption trailers may be missing"
 	}
 	return d
+}
+
+// populateCycleSummary fills the headline numbers shown on the cycle
+// slide (ticket count, fallback-fraction footnote, two median labels).
+// Medians are weighted by ticket count rather than averaging week
+// medians, so a high-volume week dominates the headline figure.
+func populateCycleSummary(d *DeckData, cycles []analyze.WeekCycle) {
+	totalTickets := 0
+	totalFallback := 0
+	var sumIdeaHours, sumDevHours float64
+	for _, w := range cycles {
+		totalTickets += w.TicketCount
+		totalFallback += w.FallbackTicketCount
+		sumIdeaHours += w.MedianIdeaToDev.Hours() * float64(w.TicketCount)
+		sumDevHours += w.MedianDevToRelease.Hours() * float64(w.TicketCount)
+	}
+	d.CycleTickets = totalTickets
+	if totalTickets > 0 {
+		d.CycleFallbackPct = float64(totalFallback) / float64(totalTickets) * 100
+		d.MedianIdeaToDevText = formatHoursAsDays(sumIdeaHours / float64(totalTickets))
+		d.MedianDevToRelText = formatHoursAsDays(sumDevHours / float64(totalTickets))
+	}
+}
+
+func formatHoursAsDays(hours float64) string {
+	if hours < 24 {
+		return fmt.Sprintf("%.1f h", hours)
+	}
+	return fmt.Sprintf("%.1f d", hours/24)
 }
 
 // copyEmbeddedAssets walks each embedded asset subtree (reveal.js,

@@ -13,26 +13,28 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/StephanSchmidt/loupe/internal/analyze"
+	"github.com/StephanSchmidt/loupe/internal/selfupdate"
 	"github.com/StephanSchmidt/loupe/internal/store"
 )
 
 const stateDBPath = ".loupe/state.db"
 
-func BuildStatusCmd() *cobra.Command {
+func BuildStatusCmd(version string) *cobra.Command {
 	cmd := &cobra.Command{
 		Use:          "status",
 		Short:        "Summarise what's indexed locally — provider counts, last-import timestamps",
 		SilenceUsage: true,
-		RunE:         runStatus,
+		RunE:         func(cmd *cobra.Command, args []string) error { return runStatus(cmd, version) },
 	}
 	return cmd
 }
 
-func runStatus(cmd *cobra.Command, args []string) error {
+func runStatus(cmd *cobra.Command, version string) error {
 	out := cmd.OutOrStdout()
 
 	if _, err := os.Stat(stateDBPath); err != nil {
 		_, _ = fmt.Fprintf(out, "No state yet at %s — run `loupe baseline` first.\n", stateDBPath)
+		writeUpdateLine(cmd.Context(), out, version)
 		return nil
 	}
 
@@ -42,7 +44,19 @@ func runStatus(cmd *cobra.Command, args []string) error {
 	}
 	defer func() { _ = s.Close() }()
 
-	return WriteStatus(cmd.Context(), s, out)
+	if err := WriteStatus(cmd.Context(), s, out); err != nil {
+		return err
+	}
+	writeUpdateLine(cmd.Context(), out, version)
+	return nil
+}
+
+func writeUpdateLine(ctx context.Context, out io.Writer, version string) {
+	latest, newer := selfupdate.Check(ctx, version)
+	if !newer {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "Update available: %s (you are on %s). Run `brew upgrade loupe` or see https://github.com/StephanSchmidt/loupe/releases\n", latest, version)
 }
 
 // WriteStatus is the format-and-print path, separated from runStatus so
@@ -60,16 +74,19 @@ func WriteStatus(ctx context.Context, s *store.Store, out io.Writer) error {
 	writeTrackerLines(out, data.trackers)
 	writeCommitLines(out, data.counts, data.tickets)
 	writeSignalLines(out, data.signals)
+	writeTicketLinkLine(out, data.ticketLinks, data.ticketTransitions)
 	writeBotExclusion(out, data.counts)
 	return nil
 }
 
 type statusData struct {
-	hosts    []hostStats
-	trackers []trackerStats
-	counts   commitSummary
-	tickets  int
-	signals  []signalCount
+	hosts             []hostStats
+	trackers          []trackerStats
+	counts            commitSummary
+	tickets           int
+	signals           []signalCount
+	ticketLinks       int
+	ticketTransitions int
 }
 
 func (d statusData) empty() bool {
@@ -94,7 +111,23 @@ func loadStatusData(ctx context.Context, s *store.Store) (statusData, error) {
 	if d.signals, err = signalBreakdown(ctx, s.DB()); err != nil {
 		return d, err
 	}
+	if d.ticketLinks, err = count(ctx, s.DB(), "SELECT COUNT(DISTINCT ticket_id) FROM ticket_commits"); err != nil {
+		return d, err
+	}
+	if d.ticketTransitions, err = count(ctx, s.DB(), "SELECT COUNT(*) FROM ticket_transitions"); err != nil {
+		return d, err
+	}
 	return d, nil
+}
+
+// writeTicketLinkLine surfaces ticket↔commit and changelog coverage. Both
+// counts are zero before v0.3 — the line stays silent on those older DBs.
+func writeTicketLinkLine(out io.Writer, links, transitions int) {
+	if links == 0 && transitions == 0 {
+		return
+	}
+	_, _ = fmt.Fprintf(out, "%-10s %d tickets linked to commits, %d status transitions recorded\n",
+		"Cycle:", links, transitions)
 }
 
 func writeHostLines(out io.Writer, hosts []hostStats) {

@@ -26,6 +26,12 @@ type DetectionConfig struct {
 func RunAllDetectors(ctx context.Context, s *store.Store, cfg DetectionConfig) (int, error) {
 	total := 0
 
+	// Link commits to tickets first — cycle-time computation and the
+	// ticket_commits-joined PR signals both depend on it. Idempotent.
+	if _, err := LinkCommitsToTickets(ctx, s); err != nil {
+		return total, fmt.Errorf("ticket linking: %w", err)
+	}
+
 	n, err := DetectAndStore(ctx, s)
 	if err != nil {
 		return total, fmt.Errorf("commit-level signals: %w", err)

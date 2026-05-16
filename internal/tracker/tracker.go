@@ -41,4 +41,15 @@ type Issue struct {
 	ResolvedAt    *time.Time
 	ClosedAt      *time.Time
 	Estimate      float64
+	// Transitions are status change events on the issue, oldest-first.
+	// Populated by trackers that expose a changelog (Jira); left empty for
+	// providers that don't (GitHub Issues in v0.3).
+	Transitions []Transition
+}
+
+// Transition is a single status change on an issue.
+type Transition struct {
+	At         time.Time
+	FromStatus string
+	ToStatus   string
 }

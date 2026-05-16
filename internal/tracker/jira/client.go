@@ -87,9 +87,10 @@ type issueSearchWire struct {
 }
 
 type issueWire struct {
-	ID     string      `json:"id"`
-	Key    string      `json:"key"`
-	Fields issueFields `json:"fields"`
+	ID        string         `json:"id"`
+	Key       string         `json:"key"`
+	Fields    issueFields    `json:"fields"`
+	Changelog *changelogWire `json:"changelog,omitempty"`
 }
 
 type issueFields struct {
@@ -109,6 +110,24 @@ type issueFields struct {
 		Key string `json:"key"`
 	} `json:"project"`
 	TimeEstimate float64 `json:"timeestimate"`
+}
+
+// changelogWire is Jira's standard expand=changelog payload. histories are
+// returned newest-first by the API; the wire structure mirrors that and
+// the converter reverses to oldest-first.
+type changelogWire struct {
+	Histories []changelogHistory `json:"histories"`
+}
+
+type changelogHistory struct {
+	Created jiraTime               `json:"created"`
+	Items   []changelogHistoryItem `json:"items"`
+}
+
+type changelogHistoryItem struct {
+	Field      string `json:"field"`
+	FromString string `json:"fromString"`
+	ToString   string `json:"toString"`
 }
 
 // jiraTime parses Jira's "2026-01-01T10:00:00.000+0000" timestamps, which
@@ -230,6 +249,11 @@ func (c *Client) ListIssues(ctx context.Context, projectKey string, since time.T
 			q.Set("jql", jql)
 			q.Set("maxResults", "100")
 			q.Set("fields", "summary,issuetype,status,created,resolutiondate,assignee,project,timeestimate")
+			// expand=changelog inlines status-transition history on each issue
+			// so cycle-time computation doesn't need a per-issue follow-up
+			// request. Histories come back newest-first; issueFromWire flips
+			// them to oldest-first before populating tracker.Transition.
+			q.Set("expand", "changelog")
 			if nextToken != "" {
 				q.Set("nextPageToken", nextToken)
 			}
@@ -284,5 +308,32 @@ func issueFromWire(raw issueWire) tracker.Issue {
 		iss.ResolvedAt = &t
 		iss.ClosedAt = &t
 	}
+	iss.Transitions = transitionsFromChangelog(raw.Changelog)
 	return iss
+}
+
+// transitionsFromChangelog flattens Jira's nested history payload into a
+// list of status-only transitions, oldest-first. Non-status items (field,
+// assignee, …) are dropped.
+func transitionsFromChangelog(cl *changelogWire) []tracker.Transition {
+	if cl == nil || len(cl.Histories) == 0 {
+		return nil
+	}
+	var out []tracker.Transition
+	// Jira returns histories newest-first; iterate in reverse so the
+	// emitted slice is oldest-first.
+	for i := len(cl.Histories) - 1; i >= 0; i-- {
+		h := cl.Histories[i]
+		for _, item := range h.Items {
+			if item.Field != "status" {
+				continue
+			}
+			out = append(out, tracker.Transition{
+				At:         h.Created.Time,
+				FromStatus: item.FromString,
+				ToStatus:   item.ToString,
+			})
+		}
+	}
+	return out
 }
