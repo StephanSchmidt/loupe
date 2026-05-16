@@ -557,6 +557,7 @@ require (
 )
 
 tool (
+	github.com/StephanSchmidt/loupe/scripts/smoke
 	github.com/fzipp/gocyclo/cmd/gocyclo
 	github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 	github.com/goreleaser/goreleaser/v2

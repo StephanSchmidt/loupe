@@ -156,10 +156,6 @@ There's no ROI calculation. The math you'd need — hours saved per AI-tagged co
 
 If no AI signal is detected, the deck still renders. Throughput and lead time don't need it.
 
-## Adding a provider
-
-Two interfaces: [`internal/githost/host.go`](internal/githost/host.go) and [`internal/tracker/tracker.go`](internal/tracker/tracker.go). Drop in a package that implements one, add a switch case to `buildGitHost` / `buildTracker` in [`cmd/cmdbaseline/cmdbaseline.go`](cmd/cmdbaseline/cmdbaseline.go), and the rest of the pipeline (ingest, analyze, deck) doesn't need to change.
-
 ## Development
 
 ```bash
@@ -169,7 +165,7 @@ make coverage-check  # fails below 80% line coverage
 make lint            # vet + staticcheck + golangci-lint + nilaway + gocyclo
 make sec             # gosec + govulncheck
 make check           # lint + sec + secrets
-./scripts/smoke.sh   # end-to-end against an in-process httptest server
+go tool smoke        # end-to-end against an in-process httptest server
 ```
 
 Go 1.26.3, `modernc.org/sqlite` (pure Go, no CGO), GoReleaser cross-compiles linux/darwin/windows for amd64+arm64.
