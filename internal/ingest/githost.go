@@ -19,10 +19,12 @@ import (
 
 // GitHostStats is the summary returned by IngestGitHost.
 type GitHostStats struct {
-	Workspaces   int
-	Repos        int
-	Commits      int
-	PullRequests int
+	Workspaces       int
+	Repos            int
+	ReposSkippedArch int
+	ReposFailed      int
+	Commits          int
+	PullRequests     int
 }
 
 // GitHostFilter restricts which workspaces/repos get ingested. The zero
@@ -38,6 +40,13 @@ type GitHostFilter struct {
 // & PRs) and persists every row into s. Each repo's watermark is advanced
 // at the end of its loop body, so a mid-baseline failure preserves
 // progress for repos already processed.
+//
+// Per-repo errors are non-fatal: the repo is logged + counted in
+// stats.ReposFailed and the loop continues. Watermarks for the failed
+// repo stay unset so the next baseline retries it; completed repos
+// retain their watermarks and stream only the new commits/PRs. The
+// overall call still returns an error when any repo failed, so the CLI
+// surfaces an exit code, but the persisted state is consistent.
 //
 // progressOut may be nil; otherwise it receives one line per repo.
 func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, progressOut io.Writer, filter GitHostFilter) (GitHostStats, error) {
@@ -60,13 +69,31 @@ func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, prog
 	if err != nil {
 		return stats, fmt.Errorf("list workspaces: %w", err)
 	}
+	var firstErr error
+	recordErr := func(err error) {
+		if firstErr == nil {
+			firstErr = err
+		}
+	}
 	for _, ws := range workspaces {
 		if wantWorkspace != "" && ws.Slug != wantWorkspace {
 			continue
 		}
-		if err := ingestWorkspace(ctx, s.DB(), gh, provider, ws, now, progressOut, &stats, filter); err != nil {
-			return stats, err
+		if err := ingestWorkspace(ctx, s.DB(), gh, provider, ws, now, progressOut, &stats, filter, recordErr); err != nil {
+			// Per-workspace failures (ListRepos errors, ctx cancel) are
+			// fatal here only when ctx is gone; otherwise log and
+			// continue so the remaining workspaces still get tried.
+			if ctx.Err() != nil {
+				return stats, err
+			}
+			recordErr(err)
+			if progressOut != nil {
+				_, _ = fmt.Fprintf(progressOut, "  workspace %s failed: %v\n", ws.Slug, err)
+			}
 		}
+	}
+	if firstErr != nil {
+		return stats, fmt.Errorf("%d repos failed; rerun to resume (first error: %w)", stats.ReposFailed, firstErr)
 	}
 	return stats, nil
 }
@@ -81,6 +108,7 @@ func ingestWorkspace(
 	progressOut io.Writer,
 	stats *GitHostStats,
 	filter GitHostFilter,
+	recordErr func(error),
 ) error {
 	if err := upsertWorkspace(ctx, db, provider, ws, now); err != nil {
 		return err
@@ -92,11 +120,33 @@ func ingestWorkspace(
 		return fmt.Errorf("list repos for %s: %w", ws.Slug, err)
 	}
 	for _, repo := range repos {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		if filter.Repo != "" && repo.FullName() != filter.Repo {
 			continue
 		}
+		if repo.Archived {
+			stats.ReposSkippedArch++
+			if progressOut != nil {
+				_, _ = fmt.Fprintf(progressOut, "    %s: skipped (archived)\n", repo.FullName())
+			}
+			continue
+		}
 		if err := ingestRepo(ctx, db, gh, provider, repo, now, progressOut, stats); err != nil {
-			return err
+			// One bad repo (renamed away, ACL drift, persistent 5xx)
+			// must not abort the run — completed repos already have
+			// their watermark set, and the failing repo's watermark
+			// stays unset so the next baseline retries it. The error
+			// is surfaced at the IngestGitHost layer via
+			// stats.ReposFailed; here we log + continue so the rest of
+			// the workspace gets ingested.
+			stats.ReposFailed++
+			recordErr(fmt.Errorf("%s: %w", repo.FullName(), err))
+			if progressOut != nil {
+				_, _ = fmt.Fprintf(progressOut, "    %s: FAILED — %v\n", repo.FullName(), err)
+			}
+			continue
 		}
 	}
 	return advanceWorkspaceWatermark(ctx, db, provider, ws.Slug, now)

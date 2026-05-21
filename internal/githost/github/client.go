@@ -9,9 +9,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"iter"
 	"net/http"
 	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -28,7 +30,67 @@ const (
 	// DefaultBaseURL is the github.com REST endpoint. GHE deployments would
 	// use https://<host>/api/v3 — not supported by v0 (see package doc).
 	DefaultBaseURL = "https://api.github.com"
+
+	// maxRateLimitRetries bounds how many consecutive rate-limit waits a
+	// single request will tolerate before giving up. Five gives plenty of
+	// headroom for the primary 5000/h limit plus a couple of secondary
+	// bursts without looping forever on a misbehaving upstream.
+	maxRateLimitRetries = 5
+
+	// maxRateLimitWait caps any single sleep. The primary limit resets at
+	// most one hour out, so anything longer is almost certainly a clock
+	// skew or a header bug and not worth waiting through.
+	maxRateLimitWait = time.Hour
+
+	// rateLimitBuffer is added to every rate-limit sleep so we don't retry
+	// exactly at the documented reset instant. GitHub and our clock can
+	// disagree by a few seconds, and an early retry just earns another 403
+	// against the not-yet-reset window. 15s is overkill for plain clock
+	// skew but cheap insurance.
+	rateLimitBuffer = 15 * time.Second
+
+	// maxTransientRetries bounds retries for transport-level failures (HTTP/2
+	// stream cancels, connection resets, unexpected EOFs mid-body). Three
+	// attempts after the first means worst-case 7s of backoff before we
+	// surface the error to the caller — long enough to ride out a brief
+	// upstream blip, short enough not to mask a real outage.
+	maxTransientRetries = 3
+
+	// transientRetryBase is the first transient-retry sleep. Doubles each
+	// attempt (1s, 2s, 4s).
+	transientRetryBase = time.Second
+
+	// maxRedirects bounds the number of 301/302 hops a single request will
+	// follow before giving up. GitHub returns 301 for renamed or
+	// transferred repos, pointing at the /repositories/{id}/... canonical
+	// path; a small cap is enough for the documented one-hop case and
+	// prevents misconfigured upstreams from looping us indefinitely.
+	maxRedirects = 3
 )
+
+// rateLimitBackoffFloor is the per-attempt minimum sleep applied to retries
+// after the first. The initial retry honors X-RateLimit-Reset as-is (usually
+// accurate). Subsequent retries enforce this floor to defend against the
+// boundary case where GitHub keeps returning Remaining: 0 with a reset
+// header at-or-before "now" — typically clock skew at the reset boundary,
+// or a secondary (abuse) limit signalled with stale primary-limit headers.
+// Indexed by retry attempt minus one; attempts past the end reuse the last.
+var rateLimitBackoffFloor = [...]time.Duration{
+	1 * time.Minute,
+	2 * time.Minute,
+	4 * time.Minute,
+	8 * time.Minute,
+	16 * time.Minute,
+}
+
+// rateLimitLog is where the wrapper writes "sleeping until reset" lines.
+// Stored as a package-level variable so tests can redirect it.
+var rateLimitLog io.Writer = os.Stderr
+
+// sleepCh indirects time.After so tests can replace the sleeper with an
+// instant-fire channel and avoid wall-clock waits in the rate-limit retry
+// loop. Mirrors the rateLimitLog pattern.
+var sleepCh = func(d time.Duration) <-chan time.Time { return time.After(d) }
 
 // Client implements githost.GitHost against GitHub.
 //
@@ -86,6 +148,7 @@ type wireRepo struct {
 		Login string `json:"login"`
 		Type  string `json:"type"`
 	} `json:"owner"`
+	Archived bool `json:"archived"`
 }
 
 type wireCommitAuthor struct {
@@ -157,7 +220,7 @@ func (c *Client) ListWorkspaces(ctx context.Context) ([]githost.Workspace, error
 
 func (c *Client) getAuthedUser(ctx context.Context) (wireUser, error) {
 	var u wireUser
-	resp, err := c.api.Do(ctx, "GET", "/user", "", nil)
+	resp, err := c.doRequest(ctx, "GET", "/user", "", nil)
 	if err != nil {
 		return u, err
 	}
@@ -245,7 +308,8 @@ func repoFromWire(r wireRepo) githost.Repo {
 			Workspace: r.Owner.Login,
 			Slug:      r.Name,
 		},
-		Name: r.Name,
+		Name:     r.Name,
+		Archived: r.Archived,
 	}
 }
 
@@ -409,16 +473,217 @@ func (c *Client) ListPRCommits(ctx context.Context, repo githost.RepoRef, prID s
 
 // --- helpers ---
 
+// doRequest wraps c.api.Do with a GitHub-specific rate-limit retry loop.
+//
+// GitHub signals rate limiting two ways:
+//   - Primary REST limit: HTTP 403 with X-RateLimit-Remaining: 0 and a
+//     X-RateLimit-Reset unix-epoch header. The shared apiclient surfaces
+//     this as a fatal *StatusError because 403 isn't covered by its
+//     generic Retry-After path.
+//   - Secondary (abuse) limit: HTTP 429, sometimes with Retry-After.
+//     apiclient already does a one-shot retry for Retry-After ≤ 60s; we
+//     handle the longer or header-less cases here.
+//
+// On a retryable response we sleep until the documented reset (capped at
+// maxRateLimitWait), log one line to rateLimitLog so the user sees why
+// the run paused, then retry up to maxRateLimitRetries times. Anything
+// else is returned unchanged.
+func (c *Client) doRequest(ctx context.Context, method, path, rawQuery string, body io.Reader) (*http.Response, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxRateLimitRetries; attempt++ {
+		resp, err := c.doOnceFollowingRedirects(ctx, method, path, rawQuery, body)
+		if err == nil {
+			return resp, nil
+		}
+		wait, ok := rateLimitWait(err, time.Now())
+		if !ok || wait > maxRateLimitWait {
+			return nil, err
+		}
+		lastErr = err
+		wait = applyBackoffFloor(wait, attempt) + rateLimitBuffer
+		fmt.Fprintf(rateLimitLog, "github: rate limit hit, sleeping %s until %s (attempt %d/%d)\n",
+			wait.Round(time.Second), time.Now().Add(wait).Format(time.RFC3339), attempt+1, maxRateLimitRetries)
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("github %s %s (waiting for rate limit reset): %w", method, path, ctx.Err())
+		case <-sleepCh(wait):
+		}
+	}
+	return nil, lastErr
+}
+
+// doOnceFollowingRedirects issues the request and, when the upstream
+// answers with a 301/302 pointing at the same host, re-issues against the
+// new path. GitHub returns 301 when a repo has been renamed or
+// transferred and points at the stable /repositories/{id}/... path; the
+// shared apiclient surfaces redirects as *StatusError because it
+// deliberately doesn't follow them (auth replay risk on cross-origin).
+//
+// Same-host enforcement keeps the Authorization header from leaking to a
+// foreign host. A bounded hop count guards against pathological loops.
+func (c *Client) doOnceFollowingRedirects(ctx context.Context, method, path, rawQuery string, body io.Reader) (*http.Response, error) {
+	for hop := 0; hop <= maxRedirects; hop++ {
+		resp, err := c.api.Do(ctx, method, path, rawQuery, body)
+		if err == nil {
+			return resp, nil
+		}
+		newPath, newQuery, ok := redirectTarget(err, c.baseURL)
+		if !ok {
+			return nil, err
+		}
+		if hop == maxRedirects {
+			return nil, fmt.Errorf("github %s %s: too many redirects (last → %s)", method, path, newPath)
+		}
+		fmt.Fprintf(rateLimitLog, "github: %s %s redirected → %s\n", method, path, newPath)
+		path, rawQuery = newPath, newQuery
+	}
+	return nil, fmt.Errorf("github %s %s: redirect loop", method, path)
+}
+
+// redirectTarget extracts a same-host redirect target from a *StatusError.
+// Returns (path, rawQuery, true) when err is a 301/302 with a usable
+// Location header pointing at the same host as baseURL; otherwise the
+// bool is false and the caller surfaces err unchanged.
+//
+// Non-idempotent methods would normally need 307/308 to be redirected
+// safely. Our caller only sends GETs (auth, listing endpoints), so we
+// accept 301/302 too — GitHub's renamed-repo response is 301.
+func redirectTarget(err error, baseURL string) (string, string, bool) {
+	var se *apiclient.StatusError
+	if !errors.As(err, &se) || se == nil {
+		return "", "", false
+	}
+	switch se.StatusCode {
+	case http.StatusMovedPermanently, http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect:
+	default:
+		return "", "", false
+	}
+	loc := se.Headers.Get("Location")
+	if loc == "" {
+		return "", "", false
+	}
+	base, berr := url.Parse(baseURL)
+	if berr != nil {
+		return "", "", false
+	}
+	target, terr := url.Parse(loc)
+	if terr != nil {
+		return "", "", false
+	}
+	// Resolve so a path-only Location ("/repositories/123/commits") gets
+	// the scheme+host of the base URL applied, then enforce same-host.
+	target = base.ResolveReference(target)
+	if target.Host != base.Host || target.Scheme != base.Scheme {
+		return "", "", false
+	}
+	return target.Path, target.RawQuery, true
+}
+
+// rateLimitWait inspects a *apiclient.StatusError for GitHub's rate-limit
+// signals and returns the duration to sleep before retrying. The bool is
+// false when the error doesn't look like a rate-limit response, so the
+// caller surfaces it unchanged.
+func rateLimitWait(err error, now time.Time) (time.Duration, bool) {
+	var se *apiclient.StatusError
+	if !errors.As(err, &se) || se == nil {
+		return 0, false
+	}
+	switch se.StatusCode {
+	case http.StatusForbidden:
+		// Only a 403 with Remaining: 0 is the primary rate limit; other
+		// 403s (bad scope, SAML SSO required, etc.) must not retry.
+		if se.Headers.Get("X-RateLimit-Remaining") != "0" {
+			return 0, false
+		}
+		return waitFromReset(se.Headers.Get("X-RateLimit-Reset"), now)
+	case http.StatusTooManyRequests:
+		if d, ok := apiclient.ParseRetryAfter(se.Headers.Get("Retry-After"), now); ok {
+			return d, true
+		}
+		return waitFromReset(se.Headers.Get("X-RateLimit-Reset"), now)
+	}
+	return 0, false
+}
+
+// waitFromReset parses an X-RateLimit-Reset header (unix epoch seconds)
+// and returns how long until that instant. A reset in the past yields
+// (0, true) so the caller retries immediately.
+func waitFromReset(reset string, now time.Time) (time.Duration, bool) {
+	if reset == "" {
+		return 0, false
+	}
+	secs, err := strconv.ParseInt(reset, 10, 64)
+	if err != nil {
+		return 0, false
+	}
+	d := time.Unix(secs, 0).Sub(now)
+	if d < 0 {
+		return 0, true
+	}
+	return d, true
+}
+
+// applyBackoffFloor enforces a minimum sleep on retries after the first.
+// attempt is 0-based: attempt=0 (the first sleep) is left untouched so the
+// common case "header is fresh, sleep exactly that long" is unchanged.
+// Values past the table length reuse the last entry.
+func applyBackoffFloor(wait time.Duration, attempt int) time.Duration {
+	if attempt <= 0 {
+		return wait
+	}
+	idx := attempt - 1
+	if idx >= len(rateLimitBackoffFloor) {
+		idx = len(rateLimitBackoffFloor) - 1
+	}
+	floor := rateLimitBackoffFloor[idx]
+	if wait < floor {
+		return floor
+	}
+	return wait
+}
+
 // getPage executes a GET against path?rawQuery, decodes JSON into dest,
 // and returns the URL from the Link: rel="next" header (or "" when there
 // are no more pages).
-func (c *Client) getPage(ctx context.Context, path, rawQuery string, dest any) (nextURL string, _ error) {
-	resp, err := c.api.Do(ctx, "GET", path, rawQuery, nil)
+//
+// Transient transport failures (HTTP/2 stream cancels, connection resets,
+// unexpected EOFs mid-body — observed after long-running ingest sessions)
+// are retried with exponential backoff. GET is idempotent, so retries are
+// safe. *StatusError responses are not retried here; the rate-limit cases
+// are already handled inside doRequest.
+func (c *Client) getPage(ctx context.Context, path, rawQuery string, dest any) (string, error) {
+	var lastErr error
+	for attempt := 0; attempt <= maxTransientRetries; attempt++ {
+		nextURL, err := c.getPageOnce(ctx, path, rawQuery, dest)
+		if err == nil {
+			return nextURL, nil
+		}
+		if !apiclient.IsTransientErr(err) {
+			return "", err
+		}
+		lastErr = err
+		if attempt == maxTransientRetries {
+			return "", err
+		}
+		delay := transientRetryBase * (1 << attempt)
+		fmt.Fprintf(rateLimitLog, "github: transient error, sleeping %s before retry (attempt %d/%d): %v\n",
+			delay, attempt+1, maxTransientRetries, err)
+		select {
+		case <-ctx.Done():
+			return "", fmt.Errorf("github GET %s (waiting for transient retry): %w", path, ctx.Err())
+		case <-sleepCh(delay):
+		}
+	}
+	return "", lastErr
+}
+
+func (c *Client) getPageOnce(ctx context.Context, path, rawQuery string, dest any) (string, error) {
+	resp, err := c.doRequest(ctx, "GET", path, rawQuery, nil)
 	if err != nil {
 		return "", err
 	}
 	// Capture the Link header before DecodeJSON consumes the response.
-	nextURL = parseLinkHeader(resp.Header.Get("Link"))
+	nextURL := parseLinkHeader(resp.Header.Get("Link"))
 	if err := apiclient.DecodeJSON(resp, dest); err != nil {
 		return "", err
 	}

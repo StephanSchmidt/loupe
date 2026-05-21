@@ -59,9 +59,15 @@ func (r RepoRef) FullName() string {
 }
 
 // Repo is the discovery-time record stored in the repos table.
+//
+// Archived reports whether the upstream host marks the repo as archived
+// (read-only). Providers that don't expose an archived flag leave this
+// false. Ingest skips archived repos to avoid wasting API budget on
+// repos that can no longer change.
 type Repo struct {
 	RepoRef
-	Name string
+	Name     string
+	Archived bool
 }
 
 // Commit is the neutral commit record. Message includes subject + body

@@ -246,12 +246,29 @@ func runPipeline(ctx context.Context, opts *baselineOpts, gh githost.GitHost, tr
 func runIngest(ctx context.Context, opts *baselineOpts, s *store.Store, gh githost.GitHost, trk tracker.Tracker) error {
 	out := opts.out
 	_, _ = fmt.Fprintf(out, "Indexing git host (%s)...\n", gh.Name())
-	ghStats, err := ingest.IngestGitHost(ctx, s, gh, out, ingest.GitHostFilter{Repo: opts.repoFilter})
-	if err != nil {
-		return fmt.Errorf("ingest git host: %w", err)
+	ghStats, ghErr := ingest.IngestGitHost(ctx, s, gh, out, ingest.GitHostFilter{Repo: opts.repoFilter})
+	// IngestGitHost returns a partial-failure error when one or more repos
+	// failed but the rest of the run made progress. We surface that as a
+	// warning and continue — completed repos already have their
+	// watermarks set, so the next baseline picks up where this one
+	// stopped. Hard failures (ctx cancel, ListWorkspaces error) have no
+	// usable state and abort.
+	if ghErr != nil && ghStats.ReposFailed == 0 {
+		return fmt.Errorf("ingest git host: %w", ghErr)
 	}
-	_, _ = fmt.Fprintf(out, "  %d workspaces, %d repos, %d commits, %d PRs\n",
-		ghStats.Workspaces, ghStats.Repos, ghStats.Commits, ghStats.PullRequests)
+	skipNote := ""
+	if ghStats.ReposSkippedArch > 0 {
+		skipNote = fmt.Sprintf(" (skipped %d archived)", ghStats.ReposSkippedArch)
+	}
+	failNote := ""
+	if ghStats.ReposFailed > 0 {
+		failNote = fmt.Sprintf(" (FAILED %d — rerun to resume)", ghStats.ReposFailed)
+	}
+	_, _ = fmt.Fprintf(out, "  %d workspaces, %d repos%s%s, %d commits, %d PRs\n",
+		ghStats.Workspaces, ghStats.Repos, skipNote, failNote, ghStats.Commits, ghStats.PullRequests)
+	if ghErr != nil {
+		_, _ = fmt.Fprintf(out, "  warning: %v\n", ghErr)
+	}
 	if ghStats.Commits == 0 {
 		if opts.repoFilter != "" {
 			return fmt.Errorf("no commits indexed for %q — check the --repo value matches a repo the credential can see", opts.repoFilter)
