@@ -194,6 +194,39 @@ func TestListRepos(t *testing.T) {
 	}
 }
 
+func TestListRepos_ReportsWorkspaceTotal(t *testing.T) {
+	// Bitbucket's `size` is the workspace's true repo count; `values` only
+	// holds repos the credential can read. The gap is repos hidden by
+	// insufficient scope, surfaced via WorkspaceRepoTotal.
+	f := newFake(t)
+	f.route("GET", "/2.0/repositories/acme", func(w http.ResponseWriter, _ *http.Request) {
+		mustJSON(t, w, map[string]any{
+			"size": 50,
+			"values": []map[string]any{
+				{"slug": "backend", "name": "backend", "workspace": map[string]string{"slug": "acme"}},
+				{"slug": "frontend", "name": "frontend", "workspace": map[string]string{"slug": "acme"}},
+			},
+		})
+	})
+
+	c := newClientFor(t, f.srv.URL)
+	repos, err := c.ListRepos(context.Background(), "acme")
+	if err != nil {
+		t.Fatalf("ListRepos: %v", err)
+	}
+	if len(repos) != 2 {
+		t.Fatalf("got %d repos, want 2", len(repos))
+	}
+	rc, ok := c.(githost.RepoCounter)
+	if !ok {
+		t.Fatal("bitbucket client does not implement githost.RepoCounter")
+	}
+	total, ok := rc.WorkspaceRepoTotal("acme")
+	if !ok || total != 50 {
+		t.Errorf("WorkspaceRepoTotal(acme) = (%d, %v), want (50, true)", total, ok)
+	}
+}
+
 func TestListCommitsAndPRs_TrimPayloadFields(t *testing.T) {
 	// The commit and PR list endpoints are the high-volume calls. Bitbucket
 	// returns large objects by default (rendered-HTML summaries, link maps,

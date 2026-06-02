@@ -39,12 +39,13 @@ const (
 )
 
 type event struct {
-	kind          evKind
-	ws, name      string
-	count         int
-	commits, prs  int
-	attempt       int
-	delay         time.Duration
+	kind         evKind
+	ws, name     string
+	count        int // visible repos for evFound
+	wsSize       int // workspace true repo total for evFound
+	commits, prs int
+	attempt      int
+	delay        time.Duration
 }
 
 type repoState struct {
@@ -87,9 +88,13 @@ func (l *live) send(e event) {
 	}
 }
 
-func (l *live) Listing(ws string)              { l.send(event{kind: evListing, ws: ws}) }
-func (l *live) WorkspaceFound(ws string, n int) { l.send(event{kind: evFound, ws: ws, count: n}) }
-func (l *live) RepoStart(name string)          { l.send(event{kind: evStart, name: name}) }
+func (l *live) Listing(ws string) { l.send(event{kind: evListing, ws: ws}) }
+
+func (l *live) WorkspaceFound(ws string, visible, total int) {
+	l.send(event{kind: evFound, ws: ws, count: visible, wsSize: total})
+}
+
+func (l *live) RepoStart(name string) { l.send(event{kind: evStart, name: name}) }
 
 func (l *live) RepoBackoff(name string, attempt int, d time.Duration) {
 	l.send(event{kind: evBackoff, name: name, attempt: attempt, delay: d})
@@ -157,7 +162,11 @@ func (l *live) run() {
 				pending = append(pending, styleDim.Render("  Listing repositories in "+e.ws+"…"))
 			case evFound:
 				total += e.count
-				pending = append(pending, fmt.Sprintf("  %s: %d repositories found", e.ws, e.count))
+				line := fmt.Sprintf("  %s: %d repositories found", e.ws, e.count)
+				if e.wsSize > e.count {
+					line += styleBackoff.Render(fmt.Sprintf(" (%d hidden — credential lacks read access)", e.wsSize-e.count))
+				}
+				pending = append(pending, line)
 			case evStart:
 				if _, ok := active[e.name]; !ok {
 					active[e.name] = &repoState{name: e.name}

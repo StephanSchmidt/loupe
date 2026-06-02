@@ -125,7 +125,15 @@ func ingestWorkspace(
 	if err != nil {
 		return fmt.Errorf("list repos for %s: %w", ws.Slug, err)
 	}
-	reporter.WorkspaceFound(ws.Slug, len(repos))
+	// If the host reports the workspace's true repo count, surface repos the
+	// credential can't read (insufficient token scope) as "hidden".
+	visible, total := len(repos), len(repos)
+	if rc, ok := gh.(githost.RepoCounter); ok {
+		if t, ok := rc.WorkspaceRepoTotal(ws.Slug); ok && t > total {
+			total = t
+		}
+	}
+	reporter.WorkspaceFound(ws.Slug, visible, total)
 
 	// Repos are independent: scan up to repoIngestConcurrency of them in
 	// parallel. A mutex guards the shared stats and progress writer; the

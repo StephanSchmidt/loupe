@@ -16,7 +16,7 @@ func TestLive_DrivesAndStops(t *testing.T) {
 	r := Live(&buf, 80)
 
 	r.Listing("acme")
-	r.WorkspaceFound("acme", 3)
+	r.WorkspaceFound("acme", 3, 5) // 2 hidden
 
 	var wg sync.WaitGroup
 	for _, name := range []string{"acme/a", "acme/b", "acme/c"} {

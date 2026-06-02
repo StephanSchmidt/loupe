@@ -39,6 +39,18 @@ type GitHost interface {
 	ListPRCommits(ctx context.Context, repo RepoRef, prID string) ([]Commit, error)
 }
 
+// RepoCounter is optionally implemented by hosts that can report a
+// workspace's true repo count (vs the number the credential can read), so
+// ingest can warn about repos hidden by insufficient token scope. The total
+// comes for free from a ListRepos response (e.g. Bitbucket's `size` field),
+// so WorkspaceRepoTotal must be called after ListRepos for that workspace.
+type RepoCounter interface {
+	// WorkspaceRepoTotal returns the workspace's reported repo total and
+	// whether it is known (false if ListRepos hasn't run for slug, or the
+	// host doesn't report it).
+	WorkspaceRepoTotal(slug string) (total int, ok bool)
+}
+
 // Workspace is a top-level grouping (Bitbucket workspace, GitLab group,
 // GitHub org).
 type Workspace struct {

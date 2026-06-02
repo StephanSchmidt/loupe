@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/StephanSchmidt/loupe/internal/apiclient"
@@ -32,6 +33,20 @@ type Client struct {
 	// which Atlassian API tokens cannot use. Empty means "enumerate every
 	// workspace the credential can see".
 	workspace string
+
+	// repoTotals records each workspace's reported repo `size` from its most
+	// recent ListRepos call, exposed via WorkspaceRepoTotal so ingest can
+	// warn about repos the credential can't read.
+	mu         sync.Mutex
+	repoTotals map[string]int
+}
+
+// WorkspaceRepoTotal implements githost.RepoCounter.
+func (c *Client) WorkspaceRepoTotal(slug string) (int, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	total, ok := c.repoTotals[slug]
+	return total, ok
 }
 
 // Compile-time assertion that Client implements the interface.
@@ -55,8 +70,9 @@ func New(baseURL, username, appPassword, workspace string) (githost.GitHost, err
 		return nil, fmt.Errorf("bitbucket: app password is required")
 	}
 	return &Client{
-		baseURL:   baseURL,
-		workspace: workspace,
+		baseURL:    baseURL,
+		workspace:  workspace,
+		repoTotals: make(map[string]int),
 		api: apiclient.New(baseURL,
 			apiclient.WithAuth(apiclient.BasicAuth(username, appPassword)),
 			apiclient.WithProviderName(Provider),
@@ -72,6 +88,10 @@ func (c *Client) Name() string { return Provider }
 type pagedList[T any] struct {
 	Values []T    `json:"values"`
 	Next   string `json:"next,omitempty"`
+	// Size is Bitbucket's reported total for the collection. On
+	// /repositories/{workspace} it's the workspace's true repo count, which
+	// can exceed the number of repos the credential can actually read.
+	Size int `json:"size,omitempty"`
 }
 
 type wsWire struct {
@@ -179,6 +199,11 @@ func (c *Client) ListRepos(ctx context.Context, workspaceSlug string) ([]githost
 		nextURL, err := c.getPage(ctx, next, rawQuery, &page)
 		if err != nil {
 			return nil, fmt.Errorf("list repos for %s: %w", workspaceSlug, err)
+		}
+		if pages == 0 && page.Size > 0 {
+			c.mu.Lock()
+			c.repoTotals[workspaceSlug] = page.Size
+			c.mu.Unlock()
 		}
 		for _, r := range page.Values {
 			ws := r.Workspace.Slug

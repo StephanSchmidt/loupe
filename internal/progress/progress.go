@@ -17,8 +17,10 @@ import (
 type Reporter interface {
 	// Listing announces that a workspace's repositories are being listed.
 	Listing(workspace string)
-	// WorkspaceFound reports how many repositories the workspace holds.
-	WorkspaceFound(workspace string, repoCount int)
+	// WorkspaceFound reports how many repositories the credential can read
+	// (visible) versus the workspace's true total. When total > visible the
+	// difference is repos hidden by insufficient token scope.
+	WorkspaceFound(workspace string, visible, total int)
 	// RepoStart marks a repo as actively ingesting.
 	RepoStart(fullName string)
 	// RepoBackoff reports that a repo's requests are being retried after a
@@ -37,7 +39,7 @@ func Nop() Reporter { return nopReporter{} }
 type nopReporter struct{}
 
 func (nopReporter) Listing(string)                          {}
-func (nopReporter) WorkspaceFound(string, int)              {}
+func (nopReporter) WorkspaceFound(string, int, int)         {}
 func (nopReporter) RepoStart(string)                        {}
 func (nopReporter) RepoBackoff(string, int, time.Duration)  {}
 func (nopReporter) RepoDone(string, int, int)               {}
@@ -59,9 +61,17 @@ func (p *plainReporter) line(format string, a ...any) {
 	_, _ = fmt.Fprintf(p.w, format+"\n", a...)
 }
 
-func (p *plainReporter) Listing(ws string)             { p.line("  Listing repositories in %s…", ws) }
-func (p *plainReporter) WorkspaceFound(ws string, n int) { p.line("  %s: %d repositories found", ws, n) }
-func (p *plainReporter) RepoStart(name string)         { p.line("    → %s", name) }
+func (p *plainReporter) Listing(ws string) { p.line("  Listing repositories in %s…", ws) }
+
+func (p *plainReporter) WorkspaceFound(ws string, visible, total int) {
+	if total > visible {
+		p.line("  %s: %d repositories found (%d hidden — credential lacks repo read access)", ws, visible, total-visible)
+		return
+	}
+	p.line("  %s: %d repositories found", ws, visible)
+}
+
+func (p *plainReporter) RepoStart(name string) { p.line("    → %s", name) }
 
 func (p *plainReporter) RepoBackoff(name string, attempt int, d time.Duration) {
 	p.line("    ⏳ %s: rate limited, retrying in %s (attempt %d)", name, d.Round(time.Second), attempt)
