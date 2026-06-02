@@ -130,7 +130,10 @@ func TestDo_RetriesOn429WithRetryAfter(t *testing.T) {
 	}
 }
 
-func TestDo_NoRetryWhenRetryAfterMissing(t *testing.T) {
+func TestDo_RetriesOn429WithoutRetryAfter(t *testing.T) {
+	// Bitbucket's 429s often lack a Retry-After, so we fall back to the
+	// backoff schedule rather than giving up. With a 2-step (zero-delay)
+	// schedule an always-429 server is hit 1 + 2 times, then surfaces.
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomicInc(&calls)
@@ -139,13 +142,35 @@ func TestDo_NoRetryWhenRetryAfterMissing(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	c := New(srv.URL, WithProviderName("gh"))
+	c := New(srv.URL, WithProviderName("gh"), WithRetryBackoff([]time.Duration{0, 0}))
 	_, err := c.Do(context.Background(), "GET", "/x", "", nil)
 	if err == nil {
-		t.Fatal("expected 429 to surface as error when no Retry-After")
+		t.Fatal("expected 429 to surface as error after retries are exhausted")
 	}
-	if calls != 1 {
-		t.Errorf("expected 1 call (no retry without Retry-After), got %d", calls)
+	if calls != 3 {
+		t.Errorf("expected 3 calls (1 + 2 retries), got %d", calls)
+	}
+}
+
+func TestDo_RetriesOn5xx(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomicInc(&calls) == 1 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c := New(srv.URL, WithProviderName("gh"), WithRetryBackoff([]time.Duration{0}))
+	resp, err := c.Do(context.Background(), "GET", "/x", "", nil)
+	if err != nil {
+		t.Fatalf("Do: %v (want 503 then success)", err)
+	}
+	_ = resp.Body.Close()
+	if calls != 2 {
+		t.Errorf("expected 2 calls (1 + 1 retry), got %d", calls)
 	}
 }
 

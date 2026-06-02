@@ -21,11 +21,13 @@ import (
 )
 
 // repoIngestConcurrency bounds how many repos in a workspace are scanned in
-// parallel. The dominant cost is API latency, so overlapping a few repos is
-// a large win; the store serialises writes through a single connection, so
-// the database stays consistent regardless. Matches the old measurements
-// tool's default.
-const repoIngestConcurrency = 3
+// parallel. The dominant cost is API latency, so overlapping repos is a
+// large win; the store serialises writes through a single connection, so
+// the database stays consistent regardless. Each repo additionally fetches
+// its commits and PRs concurrently, so peak in-flight requests is about
+// twice this. The apiclient's bounded 429/5xx backoff keeps that from
+// tripping rate limits.
+const repoIngestConcurrency = 8
 
 // ErrInterrupted is returned when ingest stops early because the caller's
 // context was cancelled (Ctrl-C). It wraps context.Canceled so callers can
@@ -197,13 +199,22 @@ func ingestRepo(
 		mu.Unlock()
 	}
 
-	nCommits, err = streamRepoCommits(ctx, db, gh, provider, repo)
-	if err != nil {
-		return 0, 0, err
-	}
-
-	nPRs, err = streamRepoPRs(ctx, db, gh, provider, repo, squashRecovery)
-	if err != nil {
+	// Commits and PRs hit independent endpoints and independent tables —
+	// fetch them concurrently so a repo's wall-clock is the slower of the
+	// two streams, not their sum. A real error in one cancels the other
+	// (fail-fast) via the group's context.
+	g, gctx := errgroup.WithContext(ctx)
+	g.Go(func() error {
+		n, err := streamRepoCommits(gctx, db, gh, provider, repo)
+		nCommits = n
+		return err
+	})
+	g.Go(func() error {
+		n, err := streamRepoPRs(gctx, db, gh, provider, repo, squashRecovery)
+		nPRs = n
+		return err
+	})
+	if err := g.Wait(); err != nil {
 		return 0, 0, err
 	}
 

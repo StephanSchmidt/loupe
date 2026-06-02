@@ -47,6 +47,10 @@ func Open(path string) (*Store, error) {
 	for _, pragma := range []string{
 		"PRAGMA busy_timeout = 5000",
 		"PRAGMA journal_mode = WAL",
+		// NORMAL is safe under WAL (no corruption risk, only the last
+		// transaction can be lost on power loss) and avoids an fsync per
+		// autocommit write — a large speedup for the row-at-a-time ingest.
+		"PRAGMA synchronous = NORMAL",
 		"PRAGMA foreign_keys = ON",
 	} {
 		if _, err := db.Exec(pragma); err != nil {

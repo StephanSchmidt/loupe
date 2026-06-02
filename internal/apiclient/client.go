@@ -29,7 +29,25 @@ const (
 	// Retry-After hint. A misbehaving provider could otherwise stall the
 	// run for hours.
 	maxRetryAfter = 60 * time.Second
+
+	// idleConnsPerHost keeps enough keep-alive connections open to cover
+	// the concurrent ingest fan-out, so requests beyond Go's default of 2
+	// don't pay a fresh TCP+TLS handshake each time.
+	idleConnsPerHost = 16
 )
+
+// defaultBackoff is the retry schedule for transient upstream failures
+// (HTTP 429 and 5xx) on idempotent GETs. Bitbucket's rate limit is
+// cost-based and can take tens of seconds to clear, so the tail is
+// deliberately long but bounded.
+var defaultBackoff = []time.Duration{
+	1 * time.Second,
+	2 * time.Second,
+	4 * time.Second,
+	8 * time.Second,
+	16 * time.Second,
+	30 * time.Second,
+}
 
 // HTTPDoer abstracts request execution for testability.
 type HTTPDoer interface {
@@ -73,6 +91,9 @@ type Client struct {
 	providerName string
 	http         HTTPDoer
 	timeout      time.Duration
+	// backoff is the per-attempt sleep schedule for retrying idempotent
+	// GETs on 429/5xx. len(backoff) is the maximum number of retries.
+	backoff []time.Duration
 }
 
 // Option configures a Client.
@@ -85,13 +106,21 @@ func New(baseURL string, opts ...Option) *Client {
 		auth:    NoAuth(),
 		headers: make(map[string]string),
 		timeout: DefaultTimeout,
+		backoff: defaultBackoff,
 	}
 	for _, opt := range opts {
 		opt(c)
 	}
 	if c.http == nil {
+		// Clone the default transport and widen its per-host idle pool so
+		// concurrent ingest reuses keep-alive connections instead of
+		// re-handshaking past Go's default of 2.
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.MaxIdleConns = 100
+		tr.MaxIdleConnsPerHost = idleConnsPerHost
 		c.http = &http.Client{
-			Timeout: c.timeout,
+			Timeout:   c.timeout,
+			Transport: tr,
 			// Don't follow redirects — auth headers would otherwise be
 			// replayed to whatever the upstream forwards to.
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -126,6 +155,13 @@ func WithHTTPDoer(doer HTTPDoer) Option {
 // WithHTTPDoer is also set).
 func WithTimeout(d time.Duration) Option {
 	return func(c *Client) { c.timeout = d }
+}
+
+// WithRetryBackoff overrides the retry schedule for transient (429/5xx)
+// failures. Mainly for tests, which pass zero-length sleeps to keep fast;
+// a nil or empty schedule disables retries.
+func WithRetryBackoff(schedule []time.Duration) Option {
+	return func(c *Client) { c.backoff = schedule }
 }
 
 // StatusError carries a non-2xx HTTP response so callers can branch on
@@ -175,18 +211,9 @@ func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body io.
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.send(ctx, req, method, path, body == nil)
 	if err != nil {
-		return nil, fmt.Errorf("%s %s %s: %w", c.displayName(), method, path, err)
-	}
-	if resp == nil {
-		return nil, fmt.Errorf("%s %s %s: nil response", c.displayName(), method, path)
-	}
-	if resp.StatusCode == http.StatusTooManyRequests && body == nil {
-		resp, err = c.retryAfter429(ctx, req, resp, method, path)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, c.toStatusError(resp, method, path)
@@ -194,30 +221,61 @@ func (c *Client) Do(ctx context.Context, method, path, rawQuery string, body io.
 	return resp, nil
 }
 
-// retryAfter429 performs a one-shot retry when the upstream returns 429
-// with a usable Retry-After hint. Only GETs (body == nil) reach this
-// path — we don't have to rewind a consumed request body. Returns the
-// original response unchanged when the hint is missing or out of range.
-func (c *Client) retryAfter429(ctx context.Context, req *http.Request, resp *http.Response, method, path string) (*http.Response, error) {
-	delay, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now())
-	if !ok || delay > maxRetryAfter {
-		return resp, nil
+// send executes req, retrying transient failures (429 and 5xx) on
+// idempotent GETs (retriable) with bounded backoff. Transport-level errors
+// are NOT retried — they surface immediately. A non-retriable or final
+// response is returned as-is for the caller to status-check.
+func (c *Client) send(ctx context.Context, req *http.Request, method, path string, retriable bool) (*http.Response, error) {
+	for attempt := 0; ; attempt++ {
+		resp, err := c.http.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("%s %s %s: %w", c.displayName(), method, path, err)
+		}
+		if resp == nil {
+			return nil, fmt.Errorf("%s %s %s: nil response", c.displayName(), method, path)
+		}
+		if !retriable {
+			return resp, nil
+		}
+		delay, retry := c.retryDelay(resp, attempt)
+		if !retry {
+			return resp, nil
+		}
+		// Drain + close so the keep-alive connection can be reused, then
+		// wait — honouring cancellation — before the next attempt.
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("%s %s %s (waiting to retry): %w", c.displayName(), method, path, ctx.Err())
+		case <-time.After(delay):
+		}
 	}
-	_, _ = io.Copy(io.Discard, resp.Body)
-	_ = resp.Body.Close()
-	select {
-	case <-ctx.Done():
-		return nil, fmt.Errorf("%s %s %s (waiting for 429 retry): %w", c.displayName(), method, path, ctx.Err())
-	case <-time.After(delay):
+}
+
+// retryDelay decides whether a response should be retried and how long to
+// wait first. 429 honours a usable Retry-After hint (giving up if it's
+// longer than maxRetryAfter), otherwise falls back to the backoff
+// schedule; 5xx always uses the schedule. attempt indexes c.backoff, so
+// retries stop once it's exhausted.
+func (c *Client) retryDelay(resp *http.Response, attempt int) (time.Duration, bool) {
+	if attempt >= len(c.backoff) {
+		return 0, false
 	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("%s %s %s (after 429 retry): %w", c.displayName(), method, path, err)
+	switch {
+	case resp.StatusCode == http.StatusTooManyRequests:
+		if d, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+			if d > maxRetryAfter {
+				return 0, false
+			}
+			return d, true
+		}
+		return c.backoff[attempt], true
+	case resp.StatusCode >= 500 && resp.StatusCode < 600:
+		return c.backoff[attempt], true
+	default:
+		return 0, false
 	}
-	if resp == nil {
-		return nil, fmt.Errorf("%s %s %s (after 429 retry): nil response", c.displayName(), method, path)
-	}
-	return resp, nil
 }
 
 // toStatusError drains a non-2xx response body (capped at 1KiB for the
