@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"fmt"
@@ -155,4 +156,16 @@ func (s *Store) DB() *sql.DB {
 
 func (s *Store) Path() string {
 	return s.path
+}
+
+// CommitCount returns how many commits the store already holds for a
+// provider. A resumed `baseline` run uses this to tell "we have data, just
+// nothing new to fetch" apart from "nothing was ever indexed".
+func (s *Store) CommitCount(ctx context.Context, provider string) (int, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM commits WHERE provider = ?`, provider).Scan(&n)
+	if err != nil {
+		return 0, fmt.Errorf("count commits for %s: %w", provider, err)
+	}
+	return n, nil
 }

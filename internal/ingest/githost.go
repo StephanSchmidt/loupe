@@ -27,6 +27,13 @@ import (
 // tool's default.
 const repoIngestConcurrency = 3
 
+// ErrInterrupted is returned when ingest stops early because the caller's
+// context was cancelled (Ctrl-C). It wraps context.Canceled so callers can
+// detect it with errors.Is(err, context.Canceled). In-flight repos are
+// allowed to finish first, so the progress they made is persisted and the
+// next run resumes from there.
+var ErrInterrupted = fmt.Errorf("ingest interrupted: %w", context.Canceled)
+
 // GitHostStats is the summary returned by IngestGitHost.
 type GitHostStats struct {
 	Workspaces   int
@@ -81,6 +88,9 @@ func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, prog
 		if wantWorkspace != "" && ws.Slug != wantWorkspace {
 			continue
 		}
+		if ctx.Err() != nil {
+			return stats, ErrInterrupted
+		}
 		if err := ingestWorkspace(ctx, s.DB(), gh, provider, ws, now, progressOut, &stats, filter); err != nil {
 			return stats, err
 		}
@@ -111,14 +121,26 @@ func ingestWorkspace(
 
 	// Repos are independent: scan up to repoIngestConcurrency of them in
 	// parallel. A mutex guards the shared stats and progress writer; the
-	// store itself serialises writes through its single connection. The
-	// first repo error cancels the group's context and is returned.
-	g, gctx := errgroup.WithContext(ctx)
+	// store itself serialises writes through its single connection.
+	//
+	// On Ctrl-C we let in-flight repos finish rather than abandoning them
+	// mid-write, so their watermarks are saved and the next run resumes
+	// cleanly. That means the repo work must NOT observe the signal
+	// cancellation: it runs under a detached context. The signal context
+	// (ctx) is only consulted to stop scheduling *new* repos. A genuine
+	// repo error still cancels its siblings via gctx (fail-fast).
+	workCtx := context.WithoutCancel(ctx)
+	g, gctx := errgroup.WithContext(workCtx)
 	g.SetLimit(repoIngestConcurrency)
 	var mu sync.Mutex
+	interrupted := false
 	for _, repo := range repos {
 		if filter.Repo != "" && repo.FullName() != filter.Repo {
 			continue
+		}
+		if ctx.Err() != nil {
+			interrupted = true
+			break
 		}
 		repo := repo
 		g.Go(func() error {
@@ -137,7 +159,12 @@ func ingestWorkspace(
 	if err := g.Wait(); err != nil {
 		return err
 	}
-	return advanceWorkspaceWatermark(ctx, db, provider, ws.Slug, now)
+	if interrupted {
+		// Don't advance the workspace watermark: the workspace isn't fully
+		// indexed. (It isn't read for skipping anyway, but keep it honest.)
+		return ErrInterrupted
+	}
+	return advanceWorkspaceWatermark(workCtx, db, provider, ws.Slug, now)
 }
 
 // ingestRepo ingests one repo and returns its commit and PR counts. It is

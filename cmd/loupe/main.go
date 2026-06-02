@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -56,8 +57,33 @@ exec meeting — no SaaS, no login, no data leaves the customer environment.`,
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	if err := newRootCmd().ExecuteContext(ctx); err != nil {
-		_, _ = fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+	// After the first interrupt, restore Go's default signal disposition so
+	// a second Ctrl-C force-quits immediately even while in-flight work is
+	// still draining gracefully.
+	go func() {
+		<-ctx.Done()
+		stop()
+	}()
+
+	code, msg := classifyExit(newRootCmd().ExecuteContext(ctx))
+	if msg != "" {
+		_, _ = fmt.Fprintln(os.Stderr, msg)
+	}
+	os.Exit(code)
+}
+
+// classifyExit maps a command's error to a process exit code and the message
+// to print on stderr (empty means print nothing). A context cancellation is
+// a user-initiated Ctrl-C/SIGTERM, not a crash: exit 130 (128+SIGINT) with a
+// terse note instead of dumping the raw "context canceled" chain. The
+// command itself prints any actionable resume hint before returning.
+func classifyExit(err error) (code int, msg string) {
+	switch {
+	case err == nil:
+		return 0, ""
+	case errors.Is(err, context.Canceled):
+		return 130, "Interrupted."
+	default:
+		return 1, err.Error()
 	}
 }

@@ -2,6 +2,7 @@ package cmdbaseline
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -234,6 +235,11 @@ func runPipeline(ctx context.Context, opts *baselineOpts, gh githost.GitHost, tr
 	defer func() { _ = s.Close() }()
 
 	if err := runIngest(ctx, opts, s, gh, trk); err != nil {
+		// Nothing new to index — the store is already current. Stop cleanly
+		// (exit 0) without regenerating the deck; `loupe present` shows it.
+		if errors.Is(err, errAlreadyUpToDate) {
+			return nil
+		}
 		return err
 	}
 	weeks, cutover, err := runAnalyze(ctx, s, opts)
@@ -241,6 +247,28 @@ func runPipeline(ctx context.Context, opts *baselineOpts, gh githost.GitHost, tr
 		return err
 	}
 	return renderAndAnnounce(ctx, opts, weeks, cutover, s)
+}
+
+// errAlreadyUpToDate signals a clean, render-skipping exit: ingest fetched
+// no new commits but the store already holds data, so a re-run has nothing
+// to do.
+var errAlreadyUpToDate = errors.New("already up to date")
+
+// ingestOutcome decides what to do after a git-host ingest pass. fetched is
+// the commit count fetched this run; stored is the total already in the
+// store for this provider. Returning skipRender requests a clean exit
+// without re-rendering.
+func ingestOutcome(fetched, stored int, repoFilter string) (skipRender bool, err error) {
+	if fetched > 0 {
+		return false, nil // new data — proceed to analyze + render
+	}
+	if stored > 0 {
+		return true, nil // nothing new, but we have data — up to date
+	}
+	if repoFilter != "" {
+		return false, fmt.Errorf("no commits indexed for %q — check the --repo value matches a repo the credential can see", repoFilter)
+	}
+	return false, fmt.Errorf("no commits indexed — is the credential correct?")
 }
 
 func runIngest(ctx context.Context, opts *baselineOpts, s *store.Store, gh githost.GitHost, trk tracker.Tracker) error {
@@ -251,19 +279,33 @@ func runIngest(ctx context.Context, opts *baselineOpts, s *store.Store, gh githo
 		SquashMergeRecovery: detectionConfigFor(opts.cfg).SquashMergeRecovery,
 	})
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			_, _ = fmt.Fprintln(out, "\nInterrupted — progress saved. Run `loupe baseline` again to continue.")
+		}
 		return fmt.Errorf("ingest git host: %w", err)
 	}
 	_, _ = fmt.Fprintf(out, "  %d workspaces, %d repos, %d commits, %d PRs\n",
 		ghStats.Workspaces, ghStats.Repos, ghStats.Commits, ghStats.PullRequests)
-	if ghStats.Commits == 0 {
-		if opts.repoFilter != "" {
-			return fmt.Errorf("no commits indexed for %q — check the --repo value matches a repo the credential can see", opts.repoFilter)
-		}
-		return fmt.Errorf("no commits indexed — is the credential correct?")
+
+	stored, err := s.CommitCount(ctx, gh.Name())
+	if err != nil {
+		return err
 	}
+	skipRender, err := ingestOutcome(ghStats.Commits, stored, opts.repoFilter)
+	if err != nil {
+		return err
+	}
+	if skipRender {
+		_, _ = fmt.Fprintf(out, "Already up to date (%d commits indexed). Run `loupe present` to view the latest deck.\n", stored)
+		return errAlreadyUpToDate
+	}
+
 	_, _ = fmt.Fprintf(out, "Indexing tracker (%s)...\n", trk.Name())
 	tStats, err := ingest.IngestTracker(ctx, s, trk, out, ingest.TrackerFilter{Project: opts.projectFilter})
 	if err != nil {
+		if errors.Is(err, context.Canceled) {
+			_, _ = fmt.Fprintln(out, "\nInterrupted — progress saved. Run `loupe baseline` again to continue.")
+		}
 		return fmt.Errorf("ingest tracker: %w", err)
 	}
 	_, _ = fmt.Fprintf(out, "  %d projects, %d tickets\n", tStats.Projects, tStats.Issues)
