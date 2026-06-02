@@ -25,13 +25,20 @@ type GitHostStats struct {
 	PullRequests int
 }
 
-// GitHostFilter restricts which workspaces/repos get ingested. The zero
-// value means "ingest everything" (the default baseline behaviour).
+// GitHostFilter restricts which workspaces/repos get ingested and carries
+// per-run ingest options. The zero value means "ingest everything, no
+// squash-merge recovery".
 type GitHostFilter struct {
 	// Repo is "workspace/slug" — when set, only this repo is ingested,
 	// every other workspace and repo is skipped before any commit or PR
 	// API call is made.
 	Repo string
+
+	// SquashMergeRecovery enables the per-PR commit fetch that recovers
+	// pre-squash commit messages. It is the most expensive part of ingest
+	// (one extra API call per PR), so it is opt-in: callers pass the value
+	// of ai_adoption.detection.squash_merge_recovery here.
+	SquashMergeRecovery bool
 }
 
 // IngestGitHost walks gh's discovery surface (workspaces → repos → commits
@@ -95,7 +102,7 @@ func ingestWorkspace(
 		if filter.Repo != "" && repo.FullName() != filter.Repo {
 			continue
 		}
-		if err := ingestRepo(ctx, db, gh, provider, repo, now, progressOut, stats); err != nil {
+		if err := ingestRepo(ctx, db, gh, provider, repo, now, progressOut, stats, filter.SquashMergeRecovery); err != nil {
 			return err
 		}
 	}
@@ -111,6 +118,7 @@ func ingestRepo(
 	now int64,
 	progressOut io.Writer,
 	stats *GitHostStats,
+	squashRecovery bool,
 ) error {
 	if err := upsertRepo(ctx, db, provider, repo, now); err != nil {
 		return err
@@ -123,7 +131,7 @@ func ingestRepo(
 	}
 	stats.Commits += nCommits
 
-	nPRs, err := streamRepoPRs(ctx, db, gh, provider, repo)
+	nPRs, err := streamRepoPRs(ctx, db, gh, provider, repo, squashRecovery)
 	if err != nil {
 		return err
 	}
@@ -161,7 +169,7 @@ func streamRepoCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, prov
 	return n, nil
 }
 
-func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo) (int, error) {
+func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, squashRecovery bool) (int, error) {
 	since, err := readRepoWatermark(ctx, db, provider, repo.FullName(), "last_pr_indexed_at")
 	if err != nil {
 		return 0, err
@@ -174,8 +182,13 @@ func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider
 		if err := upsertPR(ctx, db, provider, repo, pr); err != nil {
 			return n, err
 		}
-		if err := ingestPRCommits(ctx, db, gh, provider, repo, pr); err != nil {
-			return n, err
+		// Squash-merge recovery is the only per-PR API call; skip it
+		// entirely when disabled so a large org isn't billed one request
+		// per PR.
+		if squashRecovery {
+			if err := ingestPRCommits(ctx, db, gh, provider, repo, pr); err != nil {
+				return n, err
+			}
 		}
 		n++
 	}

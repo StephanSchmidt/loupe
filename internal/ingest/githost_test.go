@@ -17,6 +17,9 @@ type fakeGitHost struct {
 	commits    map[string][]githost.Commit      // "ws/repo" → commits
 	prs        map[string][]githost.PullRequest // "ws/repo" → PRs
 	prCommits  map[string]map[string][]githost.Commit
+	// prCommitCalls counts ListPRCommits invocations so tests can assert
+	// the per-PR squash-recovery fetch is gated by configuration.
+	prCommitCalls int
 }
 
 func (f *fakeGitHost) Name() string { return "fake-vcs" }
@@ -58,6 +61,7 @@ func (f *fakeGitHost) ListPullRequests(_ context.Context, repo githost.RepoRef, 
 }
 
 func (f *fakeGitHost) ListPRCommits(_ context.Context, repo githost.RepoRef, prID string) ([]githost.Commit, error) {
+	f.prCommitCalls++
 	return f.prCommits[repo.FullName()][prID], nil
 }
 
@@ -97,7 +101,52 @@ func buildFake() *fakeGitHost {
 					CreatedAt: at(1700000100), MergeCommitSHA: "merge-a"},
 			},
 		},
+		prCommits: map[string]map[string][]githost.Commit{
+			"acme/backend": {
+				"1": {
+					{SHA: "pc1", AuthorEmail: "alice@a", AuthorName: "Alice", CommittedAt: at(1700000050),
+						Message: "wip\n\nCo-Authored-By: Claude <noreply@anthropic.com>"},
+				},
+			},
+		},
 	}
+}
+
+func TestIngestGitHost_SquashRecoveryGate(t *testing.T) {
+	// The per-PR commit fetch (squash-merge recovery) is the most expensive
+	// part of ingest — one extra API call per PR. It must only happen when
+	// GitHostFilter.SquashMergeRecovery is set, so operators can turn it off.
+	t.Run("enabled fetches PR commits", func(t *testing.T) {
+		s, err := store.Open(store.MemoryPath)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		defer func() { _ = s.Close() }()
+		f := buildFake()
+		if _, err := IngestGitHost(context.Background(), s, f, nil, GitHostFilter{SquashMergeRecovery: true}); err != nil {
+			t.Fatalf("IngestGitHost: %v", err)
+		}
+		if f.prCommitCalls == 0 {
+			t.Errorf("ListPRCommits was not called with recovery enabled")
+		}
+		assertCount(t, s, `SELECT COUNT(*) FROM pr_commits`, 1)
+	})
+
+	t.Run("disabled skips PR commits", func(t *testing.T) {
+		s, err := store.Open(store.MemoryPath)
+		if err != nil {
+			t.Fatalf("Open: %v", err)
+		}
+		defer func() { _ = s.Close() }()
+		f := buildFake()
+		if _, err := IngestGitHost(context.Background(), s, f, nil, GitHostFilter{SquashMergeRecovery: false}); err != nil {
+			t.Fatalf("IngestGitHost: %v", err)
+		}
+		if f.prCommitCalls != 0 {
+			t.Errorf("ListPRCommits called %d times with recovery disabled, want 0", f.prCommitCalls)
+		}
+		assertCount(t, s, `SELECT COUNT(*) FROM pr_commits`, 0)
+	})
 }
 
 func TestIngestGitHost_EndToEnd(t *testing.T) {

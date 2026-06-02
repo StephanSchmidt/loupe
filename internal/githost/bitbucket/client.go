@@ -6,8 +6,10 @@ package bitbucket
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"iter"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -298,7 +300,7 @@ func (c *Client) ListPRCommits(ctx context.Context, repo githost.RepoRef, prID s
 func (c *Client) getPage(ctx context.Context, path, rawQuery string, dest any) (nextURL string, _ error) {
 	resp, err := c.api.Do(ctx, "GET", path, rawQuery, nil)
 	if err != nil {
-		return "", err
+		return "", explainAuthError(err)
 	}
 	if err := apiclient.DecodeJSON(resp, dest); err != nil {
 		return "", err
@@ -322,6 +324,20 @@ func (c *Client) getPage(ctx context.Context, path, rawQuery string, dest any) (
 		return v.Next, nil
 	}
 	return "", nil
+}
+
+// explainAuthError translates a Bitbucket 401 into actionable guidance.
+// A plain Jira/Atlassian API token authenticates to Jira but is rejected
+// by Bitbucket with an unhelpful "Token is invalid…" body; spell out the
+// two credentials that actually work so users aren't left guessing.
+func explainAuthError(err error) error {
+	var se *apiclient.StatusError
+	if errors.As(err, &se) && se.StatusCode == http.StatusUnauthorized {
+		return fmt.Errorf("bitbucket authentication failed (401): a Jira API token does not work for Bitbucket — "+
+			"use a Bitbucket app password (https://bitbucket.org/account/settings/app-passwords/) with your Bitbucket "+
+			"username, or an Atlassian API token created with explicit Bitbucket scopes (use your email as the username): %w", err)
+	}
+	return err
 }
 
 // maxPaginationPages caps any single paginated enumeration to a

@@ -246,7 +246,10 @@ func runPipeline(ctx context.Context, opts *baselineOpts, gh githost.GitHost, tr
 func runIngest(ctx context.Context, opts *baselineOpts, s *store.Store, gh githost.GitHost, trk tracker.Tracker) error {
 	out := opts.out
 	_, _ = fmt.Fprintf(out, "Indexing git host (%s)...\n", gh.Name())
-	ghStats, err := ingest.IngestGitHost(ctx, s, gh, out, ingest.GitHostFilter{Repo: opts.repoFilter})
+	ghStats, err := ingest.IngestGitHost(ctx, s, gh, out, ingest.GitHostFilter{
+		Repo:                opts.repoFilter,
+		SquashMergeRecovery: detectionConfigFor(opts.cfg).SquashMergeRecovery,
+	})
 	if err != nil {
 		return fmt.Errorf("ingest git host: %w", err)
 	}

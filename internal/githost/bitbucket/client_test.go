@@ -87,6 +87,30 @@ func TestNew_Validates(t *testing.T) {
 	}
 }
 
+func TestListRepos_401ExplainsCredential(t *testing.T) {
+	// A plain Jira API token authenticates fine to Jira but is rejected by
+	// Bitbucket. The raw "Token is invalid…" body is unhelpful, so a 401
+	// must be translated into actionable guidance about app passwords /
+	// Bitbucket-scoped tokens.
+	f := newFake(t)
+	f.route("GET", "/2.0/repositories/acme", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"type":"error","error":{"message":"Token is invalid, expired, or not supported for this endpoint."}}`))
+	})
+
+	c := newClientFor(t, f.srv.URL)
+	_, err := c.ListRepos(context.Background(), "acme")
+	if err == nil {
+		t.Fatal("ListRepos: want error on 401, got nil")
+	}
+	msg := err.Error()
+	for _, want := range []string{"app password", "Bitbucket scope"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("401 error missing %q guidance; got: %s", want, msg)
+		}
+	}
+}
+
 func TestListWorkspaces_DirectWhenWorkspaceSet(t *testing.T) {
 	// With a workspace configured, ListWorkspaces must NOT call the
 	// account-level /2.0/workspaces endpoint — that endpoint is unsupported
