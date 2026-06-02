@@ -82,6 +82,25 @@ func HeaderAuth(name, value string) AuthFunc {
 // NoAuth applies nothing — useful for tests that hit local httptest servers.
 func NoAuth() AuthFunc { return func(*http.Request) {} }
 
+// RetryNotifyFunc is called just before the client sleeps to retry a
+// transient (429/5xx) failure. attempt is the upcoming attempt number
+// (1 = first retry); delay is how long it will wait.
+type RetryNotifyFunc func(attempt int, delay time.Duration)
+
+type retryNotifyKey struct{}
+
+// WithRetryNotify attaches a callback that the client invokes before each
+// transient-failure retry on requests made with the returned context. Used
+// to surface "on backoff" status in progress UIs.
+func WithRetryNotify(ctx context.Context, fn RetryNotifyFunc) context.Context {
+	return context.WithValue(ctx, retryNotifyKey{}, fn)
+}
+
+func retryNotifyFrom(ctx context.Context) RetryNotifyFunc {
+	fn, _ := ctx.Value(retryNotifyKey{}).(RetryNotifyFunc)
+	return fn
+}
+
 // Client is the shared HTTP API client. Not safe for concurrent
 // modification — configure once, then call Do.
 type Client struct {
@@ -240,6 +259,9 @@ func (c *Client) send(ctx context.Context, req *http.Request, method, path strin
 		delay, retry := c.retryDelay(resp, attempt)
 		if !retry {
 			return resp, nil
+		}
+		if n := retryNotifyFrom(ctx); n != nil {
+			n(attempt+1, delay)
 		}
 		// Drain + close so the keep-alive connection can be reused, then
 		// wait — honouring cancellation — before the next attempt.

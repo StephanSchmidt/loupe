@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/term"
 
 	"github.com/StephanSchmidt/loupe/internal/analyze"
 	"github.com/StephanSchmidt/loupe/internal/auth"
@@ -21,6 +22,7 @@ import (
 	ghHost "github.com/StephanSchmidt/loupe/internal/githost/github"
 	glHost "github.com/StephanSchmidt/loupe/internal/githost/gitlab"
 	"github.com/StephanSchmidt/loupe/internal/ingest"
+	"github.com/StephanSchmidt/loupe/internal/progress"
 	"github.com/StephanSchmidt/loupe/internal/store"
 	"github.com/StephanSchmidt/loupe/internal/tracker"
 	adoTracker "github.com/StephanSchmidt/loupe/internal/tracker/azuredevops"
@@ -62,6 +64,7 @@ Tokens are prompted (echo off) every invocation — no env vars in v0.`,
 	cmd.Flags().Bool("dry-run", false, "validate config without writing state")
 	cmd.Flags().String("repo", "", "limit to a single repo (e.g. owner/slug); skips every other repo before any commit API call")
 	cmd.Flags().String("project", "", "limit to a single tracker project key (e.g. ENG, or owner/repo for GitHub Issues); defaults to --repo when both providers are github")
+	cmd.Flags().Bool("plain", false, "disable the animated progress display; print plain lines (auto-disabled when stdout isn't a terminal)")
 
 	// Hidden test-only flags. Documented surface stays "every invocation prompts".
 	cmd.Flags().String(flagGitHostToken, "", "")
@@ -84,6 +87,7 @@ type baselineOpts struct {
 	trackerBaseURL string
 	repoFilter     string
 	projectFilter  string
+	plain          bool
 	out            io.Writer
 }
 
@@ -121,6 +125,7 @@ func loadBaselineOpts(cmd *cobra.Command) (*baselineOpts, bool, error) {
 	dryRun, _ := cmd.Flags().GetBool("dry-run")
 	repoFilter, _ := cmd.Flags().GetString("repo")
 	projectFilter, _ := cmd.Flags().GetString("project")
+	plain, _ := cmd.Flags().GetBool("plain")
 	gitHostToken, _ := cmd.Flags().GetString(flagGitHostToken)
 	trackerToken, _ := cmd.Flags().GetString(flagTrackerToken)
 	gitHostBaseURL, _ := cmd.Flags().GetString(flagGitHostBaseURL)
@@ -173,7 +178,8 @@ func loadBaselineOpts(cmd *cobra.Command) (*baselineOpts, bool, error) {
 		gitHostToken: gitHostToken, trackerToken: trackerToken,
 		gitHostBaseURL: gitHostBaseURL, trackerBaseURL: trackerBaseURL,
 		repoFilter: repoFilter, projectFilter: projectFilter,
-		out: cmd.OutOrStdout(),
+		plain: plain,
+		out:   cmd.OutOrStdout(),
 	}, dryRun, nil
 }
 
@@ -249,6 +255,20 @@ func runPipeline(ctx context.Context, opts *baselineOpts, gh githost.GitHost, tr
 	return renderAndAnnounce(ctx, opts, weeks, cutover, s)
 }
 
+// newReporter returns an animated progress reporter when stdout is a real
+// terminal and --plain wasn't passed; otherwise a plain line-per-event one
+// (so piped/CI output stays clean and greppable).
+func newReporter(opts *baselineOpts) progress.Reporter {
+	if !opts.plain {
+		if f, ok := opts.out.(*os.File); ok && term.IsTerminal(int(f.Fd())) {
+			if w, _, err := term.GetSize(int(f.Fd())); err == nil && w > 0 {
+				return progress.Live(f, w)
+			}
+		}
+	}
+	return progress.Plain(opts.out)
+}
+
 // errAlreadyUpToDate signals a clean, render-skipping exit: ingest fetched
 // no new commits but the store already holds data, so a re-run has nothing
 // to do.
@@ -274,10 +294,12 @@ func ingestOutcome(fetched, stored int, repoFilter string) (skipRender bool, err
 func runIngest(ctx context.Context, opts *baselineOpts, s *store.Store, gh githost.GitHost, trk tracker.Tracker) error {
 	out := opts.out
 	_, _ = fmt.Fprintf(out, "Indexing git host (%s)...\n", gh.Name())
-	ghStats, err := ingest.IngestGitHost(ctx, s, gh, out, ingest.GitHostFilter{
+	reporter := newReporter(opts)
+	ghStats, err := ingest.IngestGitHost(ctx, s, gh, reporter, ingest.GitHostFilter{
 		Repo:                opts.repoFilter,
 		SquashMergeRecovery: detectionConfigFor(opts.cfg).SquashMergeRecovery,
 	})
+	reporter.Stop()
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			_, _ = fmt.Fprintln(out, "\nInterrupted — progress saved. Run `loupe baseline` again to continue.")

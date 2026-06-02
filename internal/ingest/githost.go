@@ -9,14 +9,15 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"strings"
 	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/StephanSchmidt/loupe/internal/apiclient"
 	"github.com/StephanSchmidt/loupe/internal/githost"
+	"github.com/StephanSchmidt/loupe/internal/progress"
 	"github.com/StephanSchmidt/loupe/internal/store"
 )
 
@@ -65,8 +66,11 @@ type GitHostFilter struct {
 // at the end of its loop body, so a mid-baseline failure preserves
 // progress for repos already processed.
 //
-// progressOut may be nil; otherwise it receives one line per repo.
-func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, progressOut io.Writer, filter GitHostFilter) (GitHostStats, error) {
+// reporter receives progress events; pass nil to discard them.
+func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, reporter progress.Reporter, filter GitHostFilter) (GitHostStats, error) {
+	if reporter == nil {
+		reporter = progress.Nop()
+	}
 	var stats GitHostStats
 	provider := gh.Name()
 	now := time.Now().UTC().Unix()
@@ -93,7 +97,7 @@ func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, prog
 		if ctx.Err() != nil {
 			return stats, ErrInterrupted
 		}
-		if err := ingestWorkspace(ctx, s.DB(), gh, provider, ws, now, progressOut, &stats, filter); err != nil {
+		if err := ingestWorkspace(ctx, s.DB(), gh, provider, ws, now, reporter, &stats, filter); err != nil {
 			return stats, err
 		}
 	}
@@ -107,7 +111,7 @@ func ingestWorkspace(
 	provider string,
 	ws githost.Workspace,
 	now int64,
-	progressOut io.Writer,
+	reporter progress.Reporter,
 	stats *GitHostStats,
 	filter GitHostFilter,
 ) error {
@@ -116,16 +120,12 @@ func ingestWorkspace(
 	}
 	stats.Workspaces++
 
-	if progressOut != nil {
-		_, _ = fmt.Fprintf(progressOut, "  Listing repositories in %s…\n", ws.Slug)
-	}
+	reporter.Listing(ws.Slug)
 	repos, err := gh.ListRepos(ctx, ws.Slug)
 	if err != nil {
 		return fmt.Errorf("list repos for %s: %w", ws.Slug, err)
 	}
-	if progressOut != nil {
-		_, _ = fmt.Fprintf(progressOut, "  %s: %d repositories found\n", ws.Slug, len(repos))
-	}
+	reporter.WorkspaceFound(ws.Slug, len(repos))
 
 	// Repos are independent: scan up to repoIngestConcurrency of them in
 	// parallel. A mutex guards the shared stats and progress writer; the
@@ -152,7 +152,7 @@ func ingestWorkspace(
 		}
 		repo := repo
 		g.Go(func() error {
-			nCommits, nPRs, err := ingestRepo(gctx, db, gh, provider, repo, now, progressOut, filter.SquashMergeRecovery, &mu)
+			nCommits, nPRs, err := ingestRepo(gctx, db, gh, provider, repo, now, reporter, filter.SquashMergeRecovery)
 			if err != nil {
 				return err
 			}
@@ -177,8 +177,7 @@ func ingestWorkspace(
 
 // ingestRepo ingests one repo and returns its commit and PR counts. It is
 // safe to run concurrently for distinct repos: every DB write goes through
-// the store's single serialised connection, and the shared progress writer
-// is guarded by mu.
+// the store's single serialised connection, and reporter is concurrency-safe.
 func ingestRepo(
 	ctx context.Context,
 	db *sql.DB,
@@ -186,18 +185,19 @@ func ingestRepo(
 	provider string,
 	repo githost.Repo,
 	now int64,
-	progressOut io.Writer,
+	reporter progress.Reporter,
 	squashRecovery bool,
-	mu *sync.Mutex,
 ) (nCommits, nPRs int, err error) {
 	if err := upsertRepo(ctx, db, provider, repo, now); err != nil {
 		return 0, 0, err
 	}
-	if progressOut != nil {
-		mu.Lock()
-		_, _ = fmt.Fprintf(progressOut, "    → %s\n", repo.FullName())
-		mu.Unlock()
-	}
+	reporter.RepoStart(repo.FullName())
+
+	// Carry a retry notifier so the apiclient's 429/5xx backoff surfaces as
+	// "on backoff" status for this repo without parsing request paths.
+	ctx = apiclient.WithRetryNotify(ctx, func(attempt int, delay time.Duration) {
+		reporter.RepoBackoff(repo.FullName(), attempt, delay)
+	})
 
 	// Commits and PRs hit independent endpoints and independent tables —
 	// fetch them concurrently so a repo's wall-clock is the slower of the
@@ -225,12 +225,7 @@ func ingestRepo(
 	if err := advanceRepoWatermark(ctx, db, provider, repo.FullName(), time.Now().UTC().Unix()); err != nil {
 		return 0, 0, err
 	}
-	if progressOut != nil {
-		mu.Lock()
-		_, _ = fmt.Fprintf(progressOut, "    ✓ %s: %d commits, %d PRs\n",
-			repo.FullName(), nCommits, nPRs)
-		mu.Unlock()
-	}
+	reporter.RepoDone(repo.FullName(), nCommits, nPRs)
 	return nCommits, nPRs, nil
 }
 
