@@ -75,6 +75,7 @@ func renderStaticThroughput(weeks []analyze.WeekStats, cutover analyze.Cutover, 
 	opt.CategoryAxis = charts.CategoryAxisOption{
 		Labels:        labels,
 		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
 	}
 	opt.Legend = charts.LegendOption{SeriesNames: []string{"Human", "AI-tagged"}}
 
@@ -105,6 +106,7 @@ func renderStaticAdoption(weeks []analyze.WeekStats, cutover analyze.Cutover, ou
 	opt.XAxis = charts.XAxisOption{
 		Labels:        labels,
 		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
 	}
 	opt.Legend = charts.LegendOption{SeriesNames: []string{"AI-using devs %"}}
 
@@ -152,6 +154,7 @@ func renderStaticCycle(cycles []analyze.WeekCycle, cutover analyze.Cutover, outP
 	opt.CategoryAxis = charts.CategoryAxisOption{
 		Labels:        labels,
 		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
 	}
 	opt.Legend = charts.LegendOption{SeriesNames: []string{"Dev → Release", "Idea → Dev"}}
 

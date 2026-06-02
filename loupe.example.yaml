@@ -79,6 +79,11 @@ cycle_time:
 windows:
   baseline_weeks: 12
   comparison_weeks: 12
+  # How many months of recent history the deck charts show. Older commits
+  # stay in the store (and still drive cutover detection); they're just
+  # hidden from the time-series charts so the axes stay readable. The
+  # --months flag overrides this per run.
+  display_months: 6
 
 output:
   path: ./reports

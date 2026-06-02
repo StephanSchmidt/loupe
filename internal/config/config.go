@@ -13,6 +13,7 @@ const (
 	defaultMinWeeklyAICommitsForCutover = 0.05
 	defaultBaselineWeeks                = 12
 	defaultComparisonWeeks              = 12
+	defaultDisplayMonths                = 6
 	defaultOutputPath                   = "./reports"
 	defaultBitbucketBaseURL             = "https://api.bitbucket.org/2.0"
 	defaultGitHubBaseURL                = "https://api.github.com"
@@ -125,6 +126,11 @@ type DetectionConfig struct {
 type WindowsConfig struct {
 	BaselineWeeks   int `yaml:"baseline_weeks"`
 	ComparisonWeeks int `yaml:"comparison_weeks"`
+	// DisplayMonths is how many months of recent history the deck charts
+	// show. Older data stays in the store (and still feeds cutover
+	// detection); it's just hidden from the time-series charts so the axes
+	// stay readable. Defaults to 6; the --months flag overrides it.
+	DisplayMonths int `yaml:"display_months"`
 }
 
 type OutputConfig struct {
@@ -185,6 +191,9 @@ func (c *Config) applyDefaults() {
 	}
 	if c.Windows.ComparisonWeeks == 0 {
 		c.Windows.ComparisonWeeks = defaultComparisonWeeks
+	}
+	if c.Windows.DisplayMonths == 0 {
+		c.Windows.DisplayMonths = defaultDisplayMonths
 	}
 	if c.Output.Path == "" {
 		c.Output.Path = defaultOutputPath

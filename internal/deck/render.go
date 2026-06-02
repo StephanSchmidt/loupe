@@ -107,6 +107,12 @@ func RenderDeck(
 		return fmt.Errorf("create deck dir %s: %w", deckDir, err)
 	}
 
+	// Restrict the time-series charts to the recent window so the axes stay
+	// readable. Older data still lives in the store and fed cutover
+	// detection upstream; it's only hidden from these charts.
+	weeks = analyze.WindowWeeks(weeks, cfg.Windows.DisplayMonths)
+	cycles = analyze.WindowCycles(cycles, cfg.Windows.DisplayMonths)
+
 	if err := copyEmbeddedAssets(filepath.Join(deckDir, "assets")); err != nil {
 		return err
 	}

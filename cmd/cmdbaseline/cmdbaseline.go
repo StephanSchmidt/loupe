@@ -65,6 +65,7 @@ Tokens are prompted (echo off) every invocation — no env vars in v0.`,
 	cmd.Flags().String("repo", "", "limit to a single repo (e.g. owner/slug); skips every other repo before any commit API call")
 	cmd.Flags().String("project", "", "limit to a single tracker project key (e.g. ENG, or owner/repo for GitHub Issues); defaults to --repo when both providers are github")
 	cmd.Flags().Bool("plain", false, "disable the animated progress display; print plain lines (auto-disabled when stdout isn't a terminal)")
+	cmd.Flags().Int("months", 0, "months of recent history to show in the deck charts (overrides config display_months; default 6)")
 
 	// Hidden test-only flags. Documented surface stays "every invocation prompts".
 	cmd.Flags().String(flagGitHostToken, "", "")
@@ -134,6 +135,9 @@ func loadBaselineOpts(cmd *cobra.Command) (*baselineOpts, bool, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		return nil, false, err
+	}
+	if months, _ := cmd.Flags().GetInt("months"); months > 0 {
+		cfg.Windows.DisplayMonths = months
 	}
 	override, err := resolveCutoverOverride(cutoverFlag, cfg.AIAdoption.CutoverDate)
 	if err != nil {

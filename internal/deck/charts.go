@@ -309,10 +309,32 @@ func darkCategoryAxis(labels []string) map[string]any {
 	return map[string]any{
 		"type":      "category",
 		"data":      labels,
-		"axisLabel": map[string]any{"rotate": 45, "interval": 0, "color": chartMuted},
+		"axisLabel": map[string]any{"rotate": 45, "interval": echartsLabelInterval(len(labels)), "color": chartMuted},
 		"axisLine":  map[string]any{"lineStyle": map[string]any{"color": chartAxisLine}},
 		"axisTick":  map[string]any{"lineStyle": map[string]any{"color": chartAxisLine}},
 	}
+}
+
+// maxAxisLabels is the most x-axis labels any time-series chart draws before
+// thinning kicks in — keeps even a wide custom range (e.g. --months 24)
+// legible.
+const maxAxisLabels = 14
+
+// echartsLabelInterval returns the ECharts axisLabel `interval` (labels to
+// skip between shown labels) so at most maxAxisLabels render. 0 = show all.
+func echartsLabelInterval(n int) int {
+	if n <= maxAxisLabels {
+		return 0
+	}
+	return (n+maxAxisLabels-1)/maxAxisLabels - 1
+}
+
+// staticLabelCount caps how many labels the go-analyze static charts draw.
+func staticLabelCount(n int) int {
+	if n < maxAxisLabels {
+		return n
+	}
+	return maxAxisLabels
 }
 
 // darkValueAxis returns a y-axis option. The extra map's keys override

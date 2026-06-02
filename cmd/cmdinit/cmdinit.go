@@ -49,6 +49,7 @@ ai_adoption:
 windows:
   baseline_weeks: 12
   comparison_weeks: 12
+  display_months: 6
 
 output:
   path: ./reports
