@@ -194,6 +194,44 @@ func TestListRepos(t *testing.T) {
 	}
 }
 
+func TestListCommitsAndPRs_TrimPayloadFields(t *testing.T) {
+	// The commit and PR list endpoints are the high-volume calls. Bitbucket
+	// returns large objects by default (rendered-HTML summaries, link maps,
+	// nested repo objects); excluding the fields we never decode cuts the
+	// transferred bytes substantially. Use exclusion (-) form so we can
+	// never accidentally drop a field the wire structs read.
+	f := newFake(t)
+	var commitsQuery, prsQuery string
+	f.route("GET", "/2.0/repositories/acme/backend/commits", func(w http.ResponseWriter, r *http.Request) {
+		commitsQuery = r.URL.RawQuery
+		mustJSON(t, w, map[string]any{"values": []any{}})
+	})
+	f.route("GET", "/2.0/repositories/acme/backend/pullrequests", func(w http.ResponseWriter, r *http.Request) {
+		prsQuery = r.URL.RawQuery
+		mustJSON(t, w, map[string]any{"values": []any{}})
+	})
+
+	c := newClientFor(t, f.srv.URL)
+	repo := githost.RepoRef{Workspace: "acme", Slug: "backend"}
+	for _, err := range c.ListCommits(context.Background(), repo, time.Time{}) {
+		if err != nil {
+			t.Fatalf("ListCommits: %v", err)
+		}
+	}
+	for _, err := range c.ListPullRequests(context.Background(), repo, time.Time{}) {
+		if err != nil {
+			t.Fatalf("ListPullRequests: %v", err)
+		}
+	}
+
+	if !strings.Contains(commitsQuery, "fields=") || !strings.Contains(commitsQuery, "-values.summary") {
+		t.Errorf("commits query missing field exclusions: %q", commitsQuery)
+	}
+	if !strings.Contains(prsQuery, "fields=") || !strings.Contains(prsQuery, "-values.summary") {
+		t.Errorf("PRs query missing field exclusions: %q", prsQuery)
+	}
+}
+
 func TestListCommits_StopsAtSince(t *testing.T) {
 	f := newFake(t)
 	mkCommit := func(sha, raw string, secs int64) map[string]any {

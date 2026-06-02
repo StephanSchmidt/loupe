@@ -3,6 +3,7 @@ package ingest
 import (
 	"context"
 	"iter"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,6 +21,12 @@ type fakeGitHost struct {
 	// prCommitCalls counts ListPRCommits invocations so tests can assert
 	// the per-PR squash-recovery fetch is gated by configuration.
 	prCommitCalls int
+	// measureConc, when set, makes ListCommits track the peak number of
+	// concurrent in-flight calls so a test can prove repos ingest in
+	// parallel. A short sleep guarantees overlap when parallel.
+	measureConc bool
+	curConc     int32
+	peakConc    int32
 }
 
 func (f *fakeGitHost) Name() string { return "fake-vcs" }
@@ -35,6 +42,17 @@ func (f *fakeGitHost) ListRepos(_ context.Context, ws string) ([]githost.Repo, e
 func (f *fakeGitHost) ListCommits(_ context.Context, repo githost.RepoRef, since time.Time) iter.Seq2[githost.Commit, error] {
 	commits := f.commits[repo.FullName()]
 	return func(yield func(githost.Commit, error) bool) {
+		if f.measureConc {
+			n := atomic.AddInt32(&f.curConc, 1)
+			for {
+				peak := atomic.LoadInt32(&f.peakConc)
+				if n <= peak || atomic.CompareAndSwapInt32(&f.peakConc, peak, n) {
+					break
+				}
+			}
+			time.Sleep(25 * time.Millisecond)
+			defer atomic.AddInt32(&f.curConc, -1)
+		}
 		for _, c := range commits {
 			if !since.IsZero() && c.CommittedAt.Before(since) {
 				continue
@@ -109,6 +127,26 @@ func buildFake() *fakeGitHost {
 				},
 			},
 		},
+	}
+}
+
+func TestIngestGitHost_ConcurrentReposWithinWorkspace(t *testing.T) {
+	// Repos within a workspace should ingest in parallel — the dominant
+	// cost is API latency, and the old measurements tool got its speed from
+	// concurrent repo scans. The "acme" workspace has two repos, so peak
+	// in-flight should reach 2 when parallel (and stay 1 if sequential).
+	s, err := store.Open(store.MemoryPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	f := buildFake()
+	f.measureConc = true
+	if _, err := IngestGitHost(context.Background(), s, f, nil, GitHostFilter{}); err != nil {
+		t.Fatalf("IngestGitHost: %v", err)
+	}
+	if peak := atomic.LoadInt32(&f.peakConc); peak < 2 {
+		t.Errorf("peak concurrent repo ingests = %d, want >= 2 (repos should ingest in parallel)", peak)
 	}
 }
 
@@ -286,10 +324,11 @@ func TestIngestGitHost_IdempotentReruns(t *testing.T) {
 	}
 }
 
-// TestIngestGitHost_SharedSHAKeepsFirstAttribution guards against a bug
-// where ingesting a fork (same SHA, different repo) silently overwrote
-// the original repo's attribution columns.
-func TestIngestGitHost_SharedSHAKeepsFirstAttribution(t *testing.T) {
+// TestIngestGitHost_SharedSHADeterministicAttribution checks that a SHA
+// shared by two repos (a fork) is attributed deterministically and
+// independently of ingest order — the lexicographically-smallest repo
+// wins, so concurrent scans and unstable host pagination can't flip it.
+func TestIngestGitHost_SharedSHADeterministicAttribution(t *testing.T) {
 	s, err := store.Open(store.MemoryPath)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -315,12 +354,16 @@ func TestIngestGitHost_SharedSHAKeepsFirstAttribution(t *testing.T) {
 		t.Fatalf("ingest: %v", err)
 	}
 
+	// Attribution must be deterministic and independent of ingest order
+	// (repos are scanned concurrently, and the host's repo-list order isn't
+	// guaranteed stable across runs). The lexicographically-smallest
+	// repo_name wins: "acme/fork" < "acme/origin".
 	var repo string
 	if err := s.DB().QueryRow(`SELECT repo_name FROM commits WHERE sha = 'deadbeef'`).Scan(&repo); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if repo != "acme/origin" {
-		t.Errorf("repo_name = %q, want acme/origin (first-write wins for shared SHAs)", repo)
+	if repo != "acme/fork" {
+		t.Errorf("repo_name = %q, want acme/fork (lexicographically-smallest repo wins for shared SHAs)", repo)
 	}
 }
 

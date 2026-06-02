@@ -11,11 +11,21 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"sync"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/StephanSchmidt/loupe/internal/githost"
 	"github.com/StephanSchmidt/loupe/internal/store"
 )
+
+// repoIngestConcurrency bounds how many repos in a workspace are scanned in
+// parallel. The dominant cost is API latency, so overlapping a few repos is
+// a large win; the store serialises writes through a single connection, so
+// the database stays consistent regardless. Matches the old measurements
+// tool's default.
+const repoIngestConcurrency = 3
 
 // GitHostStats is the summary returned by IngestGitHost.
 type GitHostStats struct {
@@ -98,17 +108,42 @@ func ingestWorkspace(
 	if err != nil {
 		return fmt.Errorf("list repos for %s: %w", ws.Slug, err)
 	}
+
+	// Repos are independent: scan up to repoIngestConcurrency of them in
+	// parallel. A mutex guards the shared stats and progress writer; the
+	// store itself serialises writes through its single connection. The
+	// first repo error cancels the group's context and is returned.
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(repoIngestConcurrency)
+	var mu sync.Mutex
 	for _, repo := range repos {
 		if filter.Repo != "" && repo.FullName() != filter.Repo {
 			continue
 		}
-		if err := ingestRepo(ctx, db, gh, provider, repo, now, progressOut, stats, filter.SquashMergeRecovery); err != nil {
-			return err
-		}
+		repo := repo
+		g.Go(func() error {
+			nCommits, nPRs, err := ingestRepo(gctx, db, gh, provider, repo, now, progressOut, filter.SquashMergeRecovery, &mu)
+			if err != nil {
+				return err
+			}
+			mu.Lock()
+			stats.Repos++
+			stats.Commits += nCommits
+			stats.PullRequests += nPRs
+			mu.Unlock()
+			return nil
+		})
+	}
+	if err := g.Wait(); err != nil {
+		return err
 	}
 	return advanceWorkspaceWatermark(ctx, db, provider, ws.Slug, now)
 }
 
+// ingestRepo ingests one repo and returns its commit and PR counts. It is
+// safe to run concurrently for distinct repos: every DB write goes through
+// the store's single serialised connection, and the shared progress writer
+// is guarded by mu.
 func ingestRepo(
 	ctx context.Context,
 	db *sql.DB,
@@ -117,38 +152,37 @@ func ingestRepo(
 	repo githost.Repo,
 	now int64,
 	progressOut io.Writer,
-	stats *GitHostStats,
 	squashRecovery bool,
-) error {
+	mu *sync.Mutex,
+) (nCommits, nPRs int, err error) {
 	if err := upsertRepo(ctx, db, provider, repo, now); err != nil {
-		return err
+		return 0, 0, err
 	}
-	stats.Repos++
 
-	nCommits, err := streamRepoCommits(ctx, db, gh, provider, repo)
+	nCommits, err = streamRepoCommits(ctx, db, gh, provider, repo)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	stats.Commits += nCommits
 
-	nPRs, err := streamRepoPRs(ctx, db, gh, provider, repo, squashRecovery)
+	nPRs, err = streamRepoPRs(ctx, db, gh, provider, repo, squashRecovery)
 	if err != nil {
-		return err
+		return 0, 0, err
 	}
-	stats.PullRequests += nPRs
 
 	// Use end-of-repo-ingest time as the watermark instead of run-start.
 	// If a commit lands during the ingest with committed_at between
 	// run-start and the moment we actually fetched the commit list, using
 	// run-start would skip it on the next baseline.
 	if err := advanceRepoWatermark(ctx, db, provider, repo.FullName(), time.Now().UTC().Unix()); err != nil {
-		return err
+		return 0, 0, err
 	}
 	if progressOut != nil {
+		mu.Lock()
 		_, _ = fmt.Fprintf(progressOut, "    %s: %d commits, %d PRs\n",
 			repo.FullName(), nCommits, nPRs)
+		mu.Unlock()
 	}
-	return nil
+	return nCommits, nPRs, nil
 }
 
 func streamRepoCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo) (int, error) {
@@ -308,18 +342,23 @@ func readRepoWatermark(ctx context.Context, db *sql.DB, provider, fullName, colu
 	return time.Unix(ts.Int64, 0).UTC(), nil
 }
 
-// upsertCommitSQL deliberately leaves provider/workspace/repo_name OUT of
-// the ON CONFLICT update set. Two repos can legitimately share a SHA
-// (forks, mirrors, monorepo extractions). We want first-write-wins
-// attribution rather than letting a later re-ingest of a fork silently
-// reassign every shared commit. The other columns (message, parent count,
-// committed_at) are content-of-the-commit so they're safe to re-sync.
+// upsertCommitSQL resolves the provider/workspace/repo_name attribution of
+// a shared SHA deterministically: two repos can legitimately share a SHA
+// (forks, mirrors, monorepo extractions), and the lexicographically-
+// smallest repo_name wins. This is order-independent on purpose — repos are
+// ingested concurrently and the host's repo-list order isn't stable across
+// runs, so a "first-write-wins" rule would reassign forks unpredictably.
+// The other columns (message, parent count, committed_at) are content-of-
+// the-commit so they're safe to re-sync unconditionally.
 const upsertCommitSQL = `
 INSERT INTO commits (
     sha, provider, workspace, repo_name, author_email, author_name,
     committed_at, message, parent_count, files_changed, insertions, deletions
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, 0)
 ON CONFLICT(sha) DO UPDATE SET
+    provider     = CASE WHEN excluded.repo_name < commits.repo_name THEN excluded.provider  ELSE commits.provider  END,
+    workspace    = CASE WHEN excluded.repo_name < commits.repo_name THEN excluded.workspace ELSE commits.workspace END,
+    repo_name    = CASE WHEN excluded.repo_name < commits.repo_name THEN excluded.repo_name ELSE commits.repo_name END,
     author_email = excluded.author_email,
     author_name  = excluded.author_name,
     committed_at = excluded.committed_at,

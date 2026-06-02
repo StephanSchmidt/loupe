@@ -195,6 +195,18 @@ func (c *Client) ListRepos(ctx context.Context, workspaceSlug string) ([]githost
 	return out, nil
 }
 
+// Bitbucket returns large objects by default. These exclusion-form `fields`
+// values drop the heavy parts we never decode — link maps, rendered-HTML
+// summaries, and nested repository objects — without risk of dropping a
+// field the wire structs read (exclusion only removes; pagination's `next`
+// and everything else stay). See
+// https://developer.atlassian.com/cloud/bitbucket/rest/intro/#partial-response
+const (
+	commitFieldExclusions = "-values.links,-values.summary,-values.rendered,-values.repository"
+	prFieldExclusions     = "-values.links,-values.summary,-values.rendered,-values.description," +
+		"-values.source.repository,-values.destination.repository"
+)
+
 // --- ListCommits ---
 
 // ListCommits streams commits in reverse-chronological order (Bitbucket's
@@ -203,7 +215,7 @@ func (c *Client) ListRepos(ctx context.Context, workspaceSlug string) ([]githost
 func (c *Client) ListCommits(ctx context.Context, repo githost.RepoRef, since time.Time) iter.Seq2[githost.Commit, error] {
 	return func(yield func(githost.Commit, error) bool) {
 		next := "/2.0/repositories/" + url.PathEscape(repo.Workspace) + "/" + url.PathEscape(repo.Slug) + "/commits"
-		rawQuery := "pagelen=100"
+		rawQuery := "pagelen=100&fields=" + commitFieldExclusions
 		prev := ""
 		for pages := 0; next != ""; pages++ {
 			cur := cursor(next, rawQuery)
@@ -238,7 +250,8 @@ func (c *Client) ListPullRequests(ctx context.Context, repo githost.RepoRef, sin
 	return func(yield func(githost.PullRequest, error) bool) {
 		next := "/2.0/repositories/" + url.PathEscape(repo.Workspace) + "/" + url.PathEscape(repo.Slug) + "/pullrequests"
 		// Without state= the API only returns OPEN. We want everything.
-		rawQuery := "pagelen=50&state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED&sort=-updated_on"
+		rawQuery := "pagelen=50&state=OPEN&state=MERGED&state=DECLINED&state=SUPERSEDED&sort=-updated_on" +
+			"&fields=" + prFieldExclusions
 		prev := ""
 		for pages := 0; next != ""; pages++ {
 			cur := cursor(next, rawQuery)
@@ -272,7 +285,7 @@ func (c *Client) ListPRCommits(ctx context.Context, repo githost.RepoRef, prID s
 	var out []githost.Commit
 	next := fmt.Sprintf("/2.0/repositories/%s/%s/pullrequests/%s/commits",
 		url.PathEscape(repo.Workspace), url.PathEscape(repo.Slug), url.PathEscape(prID))
-	rawQuery := "pagelen=100"
+	rawQuery := "pagelen=100&fields=" + commitFieldExclusions
 	prev := ""
 	for pages := 0; next != ""; pages++ {
 		cur := cursor(next, rawQuery)
