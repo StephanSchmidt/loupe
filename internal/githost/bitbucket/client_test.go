@@ -56,7 +56,7 @@ func (f *fakeServer) route(method, path string, hs ...http.HandlerFunc) {
 
 func newClientFor(t *testing.T, baseURL string) githost.GitHost {
 	t.Helper()
-	c, err := New(baseURL, "alice", "app-pw")
+	c, err := New(baseURL, "alice", "app-pw", "")
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -80,10 +80,30 @@ func TestNew_Validates(t *testing.T) {
 		{"https://x", "u", "", "app password"},
 	}
 	for _, c := range cases {
-		_, err := New(c.base, c.user, c.pw)
+		_, err := New(c.base, c.user, c.pw, "")
 		if err == nil || !strings.Contains(err.Error(), c.want) {
 			t.Errorf("New(%q,%q,%q) error = %v, want %q", c.base, c.user, c.pw, err, c.want)
 		}
+	}
+}
+
+func TestListWorkspaces_DirectWhenWorkspaceSet(t *testing.T) {
+	// With a workspace configured, ListWorkspaces must NOT call the
+	// account-level /2.0/workspaces endpoint — that endpoint is unsupported
+	// by Atlassian API tokens. It returns the single configured workspace
+	// directly, making zero HTTP requests. newFake fails the test on any
+	// unexpected request, so an empty route table asserts "no calls".
+	f := newFake(t)
+	c, err := New(f.srv.URL, "alice@example.com", "api-token", "acme")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got, err := c.ListWorkspaces(context.Background())
+	if err != nil {
+		t.Fatalf("ListWorkspaces: %v", err)
+	}
+	if len(got) != 1 || got[0].Slug != "acme" {
+		t.Fatalf("got %+v, want single acme workspace", got)
 	}
 }
 

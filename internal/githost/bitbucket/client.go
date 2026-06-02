@@ -25,6 +25,11 @@ const Provider = "bitbucket-cloud"
 type Client struct {
 	api     *apiclient.Client
 	baseURL string
+	// workspace, when set, is the single Bitbucket workspace to operate on.
+	// It lets ListWorkspaces skip the account-level /2.0/workspaces endpoint,
+	// which Atlassian API tokens cannot use. Empty means "enumerate every
+	// workspace the credential can see".
+	workspace string
 }
 
 // Compile-time assertion that Client implements the interface.
@@ -33,8 +38,11 @@ var _ githost.GitHost = (*Client)(nil)
 // New returns a Client. baseURL is typically https://api.bitbucket.org/2.0
 // (tests pass an httptest.Server URL). username is the Bitbucket account
 // or email; appPassword is the Bitbucket app password (or the new API
-// token — same basic-auth wire format).
-func New(baseURL, username, appPassword string) (githost.GitHost, error) {
+// token — same basic-auth wire format). workspace, when non-empty, scopes
+// the client to a single workspace so ListWorkspaces skips the account-level
+// /2.0/workspaces endpoint (unsupported by Atlassian API tokens); empty means
+// enumerate every workspace the credential can see.
+func New(baseURL, username, appPassword, workspace string) (githost.GitHost, error) {
 	if baseURL == "" {
 		return nil, fmt.Errorf("bitbucket: baseURL is required")
 	}
@@ -45,7 +53,8 @@ func New(baseURL, username, appPassword string) (githost.GitHost, error) {
 		return nil, fmt.Errorf("bitbucket: app password is required")
 	}
 	return &Client{
-		baseURL: baseURL,
+		baseURL:   baseURL,
+		workspace: workspace,
 		api: apiclient.New(baseURL,
 			apiclient.WithAuth(apiclient.BasicAuth(username, appPassword)),
 			apiclient.WithProviderName(Provider),
@@ -121,6 +130,13 @@ type prWire struct {
 // --- ListWorkspaces ---
 
 func (c *Client) ListWorkspaces(ctx context.Context) ([]githost.Workspace, error) {
+	// Scoped to a single workspace: return it directly without touching
+	// /2.0/workspaces, which Atlassian API tokens cannot use. The display
+	// name falls back to the slug (fetching it would need another call that
+	// the same token might reject).
+	if c.workspace != "" {
+		return []githost.Workspace{{Slug: c.workspace, Name: c.workspace}}, nil
+	}
 	var out []githost.Workspace
 	next := "/2.0/workspaces"
 	rawQuery := "pagelen=100"

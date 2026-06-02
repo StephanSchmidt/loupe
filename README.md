@@ -19,7 +19,7 @@ v0.3 shipped (cycle time + bot-author filtering). v0.4 adds GitLab, Linear, and 
 
 What works:
 
-- Bitbucket Cloud + Jira Cloud, GitHub on its own, GitLab (cloud or self-hosted), or Azure DevOps — one PAT plays both roles on GitHub, GitLab, and Azure DevOps. Linear can plug in as a tracker.
+- Bitbucket Cloud + Jira Cloud, GitHub on its own, GitLab (cloud or self-hosted), or Azure DevOps — one PAT plays both roles on GitHub, GitLab, and Azure DevOps; on Bitbucket + Jira a single Atlassian API token (Bitbucket scopes, `org` set to the workspace) covers both. Linear can plug in as a tracker.
 - AI detection across two confidence tiers: trailers, body footers, AI-bot author identity, PR labels, branch prefixes, and squash-merge recovery (high-confidence); seat-holder propagation (medium, opt-in)
 - Tool list: Claude Code, Aider, Copilot, Cursor, Devin, Gemini Code Assist, Jules, OpenCode
 - Auto-detected adoption cutover week, with a config override if you'd rather pin it

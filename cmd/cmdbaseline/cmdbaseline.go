@@ -362,7 +362,10 @@ func buildGitHost(cfg *config.Config, token, baseURLOverride string) (githost.Gi
 	}
 	switch cfg.GitHost.Provider {
 	case config.ProviderBitbucketCloud:
-		return bitbucket.New(base, cfg.GitHost.Username, token)
+		// org is the Bitbucket workspace: scoping the client to it lets
+		// ListWorkspaces skip /2.0/workspaces, so a single Atlassian API
+		// token works (that endpoint rejects API tokens).
+		return bitbucket.New(base, cfg.GitHost.Username, token, cfg.Org)
 	case config.ProviderGitHub:
 		return ghHost.New(base, token)
 	case config.ProviderGitLab:

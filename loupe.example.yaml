@@ -1,10 +1,15 @@
-org: acme-eng
+org: acme-eng        # for bitbucket-cloud this is the Bitbucket workspace slug
 
 git_host:
   provider: bitbucket-cloud
   base_url: https://api.bitbucket.org/2.0
   username: you@example.com
-  # Bitbucket app password is prompted at every `loupe baseline` invocation.
+  # The secret is prompted at every `loupe baseline` invocation. You can use
+  # either a Bitbucket app password (username = your Bitbucket username) or an
+  # Atlassian API token with Bitbucket scopes (username = your email). With an
+  # API token the same credential also covers jira-cloud below — loupe scopes
+  # to `org` and never calls the account-level /2.0/workspaces endpoint that
+  # API tokens can't use.
   #
   # Alternative providers:
   #
