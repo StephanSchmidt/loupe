@@ -114,9 +114,15 @@ func ingestWorkspace(
 	}
 	stats.Workspaces++
 
+	if progressOut != nil {
+		_, _ = fmt.Fprintf(progressOut, "  Listing repositories in %s…\n", ws.Slug)
+	}
 	repos, err := gh.ListRepos(ctx, ws.Slug)
 	if err != nil {
 		return fmt.Errorf("list repos for %s: %w", ws.Slug, err)
+	}
+	if progressOut != nil {
+		_, _ = fmt.Fprintf(progressOut, "  %s: %d repositories found\n", ws.Slug, len(repos))
 	}
 
 	// Repos are independent: scan up to repoIngestConcurrency of them in
@@ -185,6 +191,11 @@ func ingestRepo(
 	if err := upsertRepo(ctx, db, provider, repo, now); err != nil {
 		return 0, 0, err
 	}
+	if progressOut != nil {
+		mu.Lock()
+		_, _ = fmt.Fprintf(progressOut, "    → %s\n", repo.FullName())
+		mu.Unlock()
+	}
 
 	nCommits, err = streamRepoCommits(ctx, db, gh, provider, repo)
 	if err != nil {
@@ -205,7 +216,7 @@ func ingestRepo(
 	}
 	if progressOut != nil {
 		mu.Lock()
-		_, _ = fmt.Fprintf(progressOut, "    %s: %d commits, %d PRs\n",
+		_, _ = fmt.Fprintf(progressOut, "    ✓ %s: %d commits, %d PRs\n",
 			repo.FullName(), nCommits, nPRs)
 		mu.Unlock()
 	}
