@@ -57,6 +57,11 @@ type DeckData struct {
 	RepoAdoptionAdopted   int // repos AI-enabled as of the latest week
 	RepoAdoptionTotal     int // repos in existence as of the latest week
 
+	// Output-per-active-developer slide: commits/dev before vs after cutover.
+	ProductivityHasCutover bool
+	ProductivityBefore     float64
+	ProductivityAfter      float64
+
 	// Quality counterweight slide: revert + bug rate, before/after cutover.
 	DefectsAvailable  bool
 	DefectsHasBugs    bool
@@ -69,6 +74,14 @@ type DeckData struct {
 	BugRateAfter      float64
 	MedianIdeaToDevText string
 	MedianDevToRelText  string
+
+	// Bug-fix-speed slide: median engineering days for bug-class tickets,
+	// before vs after cutover. BugFixAvailable mirrors Charts.HasBugFix.
+	BugFixAvailable  bool
+	BugFixHasCutover bool
+	BugLeadBefore    float64 // median engineering days, bug cohort, pre-cutover
+	BugLeadAfter     float64
+	OtherLeadOverall float64 // median engineering days, non-bug cohort, whole window
 
 	// Stats panel — distribution summaries derived from Weeks. Populated
 	// when there are ≥2 weeks of data; the template hides the slide when
@@ -121,6 +134,7 @@ func RenderDeck(
 	repoAdoption []analyze.RepoAdoptionWeek,
 	wip []analyze.WIPWeek,
 	defects []analyze.DefectWeek,
+	bugfix []analyze.BugFixWeek,
 	focus []FocusData,
 	tools analyze.ToolBreakdownStats,
 	reportDate time.Time,
@@ -137,6 +151,7 @@ func RenderDeck(
 	repoAdoption = analyze.WindowRepoAdoption(repoAdoption, cfg.Windows.DisplayMonths)
 	wip = analyze.WindowWIP(wip, cfg.Windows.DisplayMonths)
 	defects = analyze.WindowDefects(defects, cfg.Windows.DisplayMonths)
+	bugfix = analyze.WindowBugFix(bugfix, cfg.Windows.DisplayMonths)
 	m := cfg.Windows.DisplayMonths
 	for i := range focus {
 		focus[i].Weeks = analyze.WindowWeeks(focus[i].Weeks, m)
@@ -144,23 +159,26 @@ func RenderDeck(
 		focus[i].RepoAdoption = analyze.WindowRepoAdoption(focus[i].RepoAdoption, m)
 		focus[i].WIP = analyze.WindowWIP(focus[i].WIP, m)
 		focus[i].Defects = analyze.WindowDefects(focus[i].Defects, m)
+		focus[i].BugFix = analyze.WindowBugFix(focus[i].BugFix, m)
 	}
 
 	if err := copyEmbeddedAssets(filepath.Join(deckDir, "assets")); err != nil {
 		return err
 	}
 
-	payload, err := BuildChartPayload(weeks, cutover, cycles, repoAdoption, wip, defects, focus)
+	payload, err := BuildChartPayload(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, focus)
 	if err != nil {
 		return fmt.Errorf("build chart payload: %w", err)
 	}
 
-	if err := RenderStaticCharts(weeks, cutover, cycles, repoAdoption, wip, defects, filepath.Join(deckDir, "charts")); err != nil {
+	if err := RenderStaticCharts(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, filepath.Join(deckDir, "charts")); err != nil {
 		return fmt.Errorf("render static charts: %w", err)
 	}
 
 	data := buildDeckData(cfg, weeks, cutover, cycles, repoAdoption, reportDate)
 	populateDefectSummary(&data, defects, cutover)
+	populateProductivitySummary(&data, weeks, cutover)
+	populateBugFixSummary(&data, bugfix, cutover)
 	data.Tools = tools.Tools
 	data.ToolsAvailable = len(tools.Tools) > 0
 	data.ToolsCommitsTotal = tools.DistinctCommits
@@ -181,6 +199,56 @@ func RenderDeck(
 		return fmt.Errorf("render template: %w", err)
 	}
 	return nil
+}
+
+// populateProductivitySummary fills the commits-per-active-dev before/after
+// cutover headline (weighted by author-weeks so weeks with more devs count
+// proportionally).
+func populateProductivitySummary(d *DeckData, weeks []analyze.WeekStats, cutover analyze.Cutover) {
+	if !cutover.Detected {
+		return
+	}
+	before, after := analyze.SplitByCutover(weeks, cutover)
+	if len(before) == 0 || len(after) == 0 {
+		return
+	}
+	perDev := func(ws []analyze.WeekStats) float64 {
+		var commits, authorWeeks int
+		for _, w := range ws {
+			commits += w.TotalCommits
+			authorWeeks += w.DistinctAuthors
+		}
+		if authorWeeks == 0 {
+			return 0
+		}
+		return float64(commits) / float64(authorWeeks)
+	}
+	d.ProductivityBefore = perDev(before)
+	d.ProductivityAfter = perDev(after)
+	d.ProductivityHasCutover = true
+}
+
+// populateBugFixSummary fills the bug-fix-speed headline: median engineering
+// days for the bug cohort before vs after cutover, plus the non-bug baseline.
+// Gated by the same minBugCycles floor that hides the chart, so the slide and
+// its headline appear together (or not at all).
+func populateBugFixSummary(d *DeckData, bugfix []analyze.BugFixWeek, cutover analyze.Cutover) {
+	_, otherMed, bugN := analyze.BugFixLeadTimes(bugfix)
+	if bugN < minBugCycles {
+		return
+	}
+	d.BugFixAvailable = true
+	d.OtherLeadOverall = otherMed.Hours() / 24
+	if cutover.Detected {
+		before, after := analyze.SplitBugFixByCutover(bugfix, cutover)
+		if len(before) > 0 && len(after) > 0 {
+			bBug, _, _ := analyze.BugFixLeadTimes(before)
+			aBug, _, _ := analyze.BugFixLeadTimes(after)
+			d.BugLeadBefore = bBug.Hours() / 24
+			d.BugLeadAfter = aBug.Hours() / 24
+			d.BugFixHasCutover = true
+		}
+	}
 }
 
 // populateDefectSummary fills the quality-counterweight headline: overall

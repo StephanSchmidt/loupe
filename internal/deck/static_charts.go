@@ -39,7 +39,7 @@ var staticChartFormats = []string{"png", "svg"}
 // is available) cycle charts under chartsDir in every format in
 // staticChartFormats. PNG is the paste-into-Slack default; SVG is for
 // high-resolution embedding.
-func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, chartsDir string) error {
+func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, bugfix []analyze.BugFixWeek, chartsDir string) error {
 	if len(weeks) == 0 {
 		return fmt.Errorf("RenderStaticCharts: no weekly data")
 	}
@@ -55,6 +55,10 @@ func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycl
 		adopt := filepath.Join(chartsDir, "adoption."+format)
 		if err := renderStaticAdoption(weeks, cutover, adopt, format); err != nil {
 			return fmt.Errorf("adoption %s: %w", format, err)
+		}
+		prod := filepath.Join(chartsDir, "productivity."+format)
+		if err := renderStaticProductivity(weeks, cutover, prod, format); err != nil {
+			return fmt.Errorf("productivity %s: %w", format, err)
 		}
 		if len(repoAdoption) > 0 {
 			ra := filepath.Join(chartsDir, "repo-adoption."+format)
@@ -74,6 +78,14 @@ func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycl
 				return fmt.Errorf("defects %s: %w", format, err)
 			}
 		}
+		// Same minBugCycles floor as the interactive slide, so the export and
+		// the deck agree on when bug-fix speed has enough data to show.
+		if _, _, bugN := analyze.BugFixLeadTimes(bugfix); bugN >= minBugCycles {
+			b := filepath.Join(chartsDir, "bugfix."+format)
+			if err := renderStaticBugFix(bugfix, cutover, b, format); err != nil {
+				return fmt.Errorf("bugfix %s: %w", format, err)
+			}
+		}
 		if len(cycles) == 0 {
 			continue
 		}
@@ -83,6 +95,43 @@ func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycl
 		}
 	}
 	return nil
+}
+
+func renderStaticProductivity(weeks []analyze.WeekStats, cutover analyze.Cutover, outPath, format string) error {
+	labels, _ := buildStaticLabels(weeks, cutover)
+	human := make([]float64, len(weeks))
+	ai := make([]float64, len(weeks))
+	for i, w := range weeks {
+		if w.DistinctAuthors > 0 {
+			d := float64(w.DistinctAuthors)
+			human[i] = float64(w.TotalCommits-w.AICommits) / d
+			ai[i] = float64(w.AICommits) / d
+		}
+	}
+
+	opt := charts.NewBarChartOptionWithData([][]float64{human, ai})
+	opt.StackSeries = charts.Ptr(true)
+	opt.Title = charts.TitleOption{Text: "Output per active developer — commits/dev per week"}
+	if cutover.Detected {
+		opt.Title.Subtext = fmt.Sprintf("AI adoption cutover: %s (%s)",
+			cutover.Date.Format("Jan 2, 2006"), cutover.Reason)
+	}
+	opt.CategoryAxis = charts.CategoryAxisOption{
+		Labels:        labels,
+		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
+	}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"Human", "AI-tagged"}}
+
+	p := charts.NewPainter(charts.PainterOptions{
+		Width:        staticChartWidth,
+		Height:       staticChartHeight,
+		OutputFormat: format,
+	})
+	if err := p.BarChart(opt); err != nil {
+		return fmt.Errorf("bar chart: %w", err)
+	}
+	return writeStaticChart(p, outPath)
 }
 
 func renderStaticDefects(rows []analyze.DefectWeek, cutover analyze.Cutover, outPath, format string) error {
@@ -132,6 +181,55 @@ func renderStaticDefects(rows []analyze.DefectWeek, cutover analyze.Cutover, out
 		LabelCount:    staticLabelCount(len(labels)),
 	}
 	opt.Legend = charts.LegendOption{SeriesNames: names}
+
+	p := charts.NewPainter(charts.PainterOptions{
+		Width:        staticChartWidth,
+		Height:       staticChartHeight,
+		OutputFormat: format,
+	})
+	if err := p.BarChart(opt); err != nil {
+		return fmt.Errorf("bar chart: %w", err)
+	}
+	return writeStaticChart(p, outPath)
+}
+
+func renderStaticBugFix(rows []analyze.BugFixWeek, cutover analyze.Cutover, outPath, format string) error {
+	labels := make([]string, len(rows))
+	bug := make([]float64, len(rows))
+	other := make([]float64, len(rows))
+	prevYear := 0
+	cutoverIdx := -1
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		bug[i] = r.BugMedianLead.Hours() / 24
+		other[i] = r.OtherMedianLead.Hours() / 24
+	}
+	if cutoverIdx >= 0 {
+		labels[cutoverIdx] = "▼ " + labels[cutoverIdx]
+	}
+
+	// Grouped bars (StackSeries left unset) — bug and non-bug are separate
+	// cohorts, not parts of a whole.
+	opt := charts.NewBarChartOptionWithData([][]float64{bug, other})
+	opt.Title = charts.TitleOption{Text: "Bug-fix speed — median engineering days"}
+	if cutover.Detected {
+		opt.Title.Subtext = fmt.Sprintf("AI adoption cutover: %s (%s)",
+			cutover.Date.Format("Jan 2, 2006"), cutover.Reason)
+	}
+	opt.CategoryAxis = charts.CategoryAxisOption{
+		Labels:        labels,
+		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
+	}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"Bug", "Other"}}
 
 	p := charts.NewPainter(charts.PainterOptions{
 		Width:        staticChartWidth,

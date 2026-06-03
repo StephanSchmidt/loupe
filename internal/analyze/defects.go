@@ -40,14 +40,16 @@ func (d DefectWeek) BugRate() float64 {
 
 // WeeklyDefects returns one DefectWeek per ISO week with any commit or ticket
 // activity. Revert detection is a "Revert " message prefix; bug detection is
-// a case-insensitive issue type of "bug".
-func WeeklyDefects(ctx context.Context, s *store.Store) ([]DefectWeek, error) {
-	return WeeklyDefectsScoped(ctx, s, Scope{})
+// a case-insensitive match of the ticket type against bugTypes.
+func WeeklyDefects(ctx context.Context, s *store.Store, bugTypes []string) ([]DefectWeek, error) {
+	return WeeklyDefectsScoped(ctx, s, Scope{}, bugTypes)
 }
 
 // WeeklyDefectsScoped is WeeklyDefects restricted to scope (repos for the
-// revert rate, tracker project for the bug rate).
-func WeeklyDefectsScoped(ctx context.Context, s *store.Store, scope Scope) ([]DefectWeek, error) {
+// revert rate, tracker project for the bug rate). bugTypes is the
+// case-insensitive set of ticket types counted as defects.
+func WeeklyDefectsScoped(ctx context.Context, s *store.Store, scope Scope, bugTypes []string) ([]DefectWeek, error) {
+	bugSet := normaliseStatuses(bugTypes)
 	cFilt, cArgs := scope.commitFilter("repo_name")
 	tFilt, tArgs := scope.ticketFilter("project_key")
 	type agg struct {
@@ -101,7 +103,7 @@ func WeeklyDefectsScoped(ctx context.Context, s *store.Store, scope Scope) ([]De
 		}
 		a := get(IsoWeekStart(time.Unix(ts, 0)))
 		a.tickets++
-		if strings.EqualFold(strings.TrimSpace(typ), "bug") {
+		if isBug(typ, bugSet) {
 			a.bugs++
 		}
 	}

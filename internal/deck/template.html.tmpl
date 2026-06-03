@@ -306,6 +306,23 @@
 </section>
 {{ end }}{{ end }}
 
+<section data-chart="productivity">
+  <h2>Output per active developer</h2>
+  <div id="productivity-chart" class="chart"></div>
+  <p class="footnote">
+    {{ if .ProductivityHasCutover }}<span class="accent">{{ printf "%.1f" .ProductivityBefore }}</span> commits/dev·week before AI → <span class="accent">{{ printf "%.1f" .ProductivityAfter }}</span> after.{{ end }}
+  </p>
+  <aside class="notes">
+    Weekly commits ÷ active developers that week, split human vs AI-tagged. Normalising by headcount separates "more output" from "more people" (hiring/attrition). Commit count is a coarse proxy — read the trend, not the absolute.
+  </aside>
+</section>
+{{ range .Charts.Focus }}{{ if .ProductivityJSON }}
+<section data-chart="productivity--{{ .Slug }}">
+  <h2>Output per active developer — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
+
 <section data-chart="adoption">
   <h2>Adoption over time</h2>
   <div id="adoption-chart" class="chart"></div>
@@ -452,6 +469,25 @@
 {{ end }}{{ end }}
 {{ end }}
 
+{{ if .Charts.HasBugFix }}
+<section data-chart="bugfix">
+  <h2>Bug-fix speed</h2>
+  <div id="bugfix-chart" class="chart"></div>
+  <p class="footnote">
+    {{ if .BugFixHasCutover }}Bug-fix engineering time <span class="accent">{{ printf "%.1f d" .BugLeadBefore }}</span> before AI → <span class="accent">{{ printf "%.1f d" .BugLeadAfter }}</span> after.{{ else }}Median bug-fix engineering time <span class="accent">{{ printf "%.1f d" .OtherLeadOverall }}</span> baseline (non-bug work).{{ end }}
+  </p>
+  <aside class="notes">
+    Median engineering time (dev start → last commit on the ticket) for defect-class tickets vs everything else, per ISO week. This isolates the part AI can plausibly speed — writing the fix — from triage wait (shown separately on the Lead-time slide). A falling Bug bar after the cutover is the "does AI fix bugs faster?" signal; compare it to the Other bar to rule out an org-wide speed-up. Medians, so a few long tails don't distort it.
+  </aside>
+</section>
+{{ range .Charts.Focus }}{{ if .BugFixJSON }}
+<section data-chart="bugfix--{{ .Slug }}">
+  <h2>Bug-fix speed — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
+{{ end }}
+
 {{ if .Charts.HasWIP }}
 <section data-chart="wip">
   <h2>Work in progress</h2>
@@ -521,6 +557,7 @@
       {{ if not .Charts.HasCycle }}<li>Lead time (needs Jira tickets with status transitions)</li>{{ end }}
       {{ if not .Charts.HasWIP }}<li>Work in progress (needs Jira tickets)</li>{{ end }}
       {{ if not .Charts.HasDefects }}<li>Defect rate / quality counterweight</li>{{ end }}
+      {{ if not .Charts.HasBugFix }}<li>Bug-fix speed (needs enough bug-typed tickets with linked commits)</li>{{ end }}
       <li>Per-team breakdown</li>
     </ul>
     <p>Cutover threshold: a week qualifies when AI-tagged commits reach <span class="accent">{{ printf "%.0f%%" .CutoverThresholdPct }}</span> of weekly commits.</p>
@@ -543,6 +580,7 @@
   {{ if .Charts.HasRepoAdoption }}const repoAdoptionOption = {{ .Charts.RepoAdoptionJSON }};{{ end }}
   {{ if .Charts.HasWIP }}const wipOption = {{ .Charts.WIPJSON }};{{ end }}
   {{ if .Charts.HasDefects }}const defectsOption = {{ .Charts.DefectsJSON }};{{ end }}
+  {{ if .Charts.HasBugFix }}const bugfixOption = {{ .Charts.BugFixJSON }};{{ end }}
   {{ if .Charts.HasCycle }}const cycleOption = {{ .Charts.CycleJSON }};{{ end }}
 
   // Cutover indices come alongside the option payloads. The cutover
@@ -552,32 +590,40 @@
   const chartOptions = {
     throughput: throughputOption,
     adoption: adoptionOption,
+    productivity: {{ .Charts.ProductivityJSON }},
     {{ if .Charts.HasRepoAdoption }}repoadoption: repoAdoptionOption,{{ end }}
     {{ if .Charts.HasWIP }}wip: wipOption,{{ end }}
     {{ if .Charts.HasDefects }}defects: defectsOption,{{ end }}
+    {{ if .Charts.HasBugFix }}bugfix: bugfixOption,{{ end }}
     {{ if .Charts.HasCycle }}cycle: cycleOption,{{ end }}
     {{ range .Charts.Focus }}
     {{ if .ThroughputJSON }}"throughput--{{ .Slug }}": {{ .ThroughputJSON }},{{ end }}
     {{ if .AdoptionJSON }}"adoption--{{ .Slug }}": {{ .AdoptionJSON }},{{ end }}
+    {{ if .ProductivityJSON }}"productivity--{{ .Slug }}": {{ .ProductivityJSON }},{{ end }}
     {{ if .HasRepoAdoption }}"repoadoption--{{ .Slug }}": {{ .RepoAdoptionJSON }},{{ end }}
     {{ if .HasWIP }}"wip--{{ .Slug }}": {{ .WIPJSON }},{{ end }}
     {{ if .HasDefects }}"defects--{{ .Slug }}": {{ .DefectsJSON }},{{ end }}
+    {{ if .BugFixJSON }}"bugfix--{{ .Slug }}": {{ .BugFixJSON }},{{ end }}
     {{ if .HasCycle }}"cycle--{{ .Slug }}": {{ .CycleJSON }},{{ end }}
     {{ end }}
   };
   const cutoverIdx = {
     throughput: {{ .Charts.ThroughputCutoverIdx }},
     adoption: {{ .Charts.AdoptionCutoverIdx }},
+    productivity: {{ .Charts.ProductivityCutoverIdx }},
     {{ if .Charts.HasRepoAdoption }}repoadoption: {{ .Charts.RepoAdoptionCutoverIdx }},{{ end }}
     {{ if .Charts.HasWIP }}wip: {{ .Charts.WIPCutoverIdx }},{{ end }}
     {{ if .Charts.HasDefects }}defects: {{ .Charts.DefectsCutoverIdx }},{{ end }}
+    {{ if .Charts.HasBugFix }}bugfix: {{ .Charts.BugFixCutoverIdx }},{{ end }}
     {{ if .Charts.HasCycle }}cycle: {{ .Charts.CycleCutoverIdx }},{{ end }}
     {{ range .Charts.Focus }}
     {{ if .ThroughputJSON }}"throughput--{{ .Slug }}": {{ .ThroughputCutoverIdx }},{{ end }}
     {{ if .AdoptionJSON }}"adoption--{{ .Slug }}": {{ .AdoptionCutoverIdx }},{{ end }}
+    {{ if .ProductivityJSON }}"productivity--{{ .Slug }}": {{ .ProductivityCutoverIdx }},{{ end }}
     {{ if .HasRepoAdoption }}"repoadoption--{{ .Slug }}": {{ .RepoAdoptionCutoverIdx }},{{ end }}
     {{ if .HasWIP }}"wip--{{ .Slug }}": {{ .WIPCutoverIdx }},{{ end }}
     {{ if .HasDefects }}"defects--{{ .Slug }}": {{ .DefectsCutoverIdx }},{{ end }}
+    {{ if .BugFixJSON }}"bugfix--{{ .Slug }}": {{ .BugFixCutoverIdx }},{{ end }}
     {{ if .HasCycle }}"cycle--{{ .Slug }}": {{ .CycleCutoverIdx }},{{ end }}
     {{ end }}
   };

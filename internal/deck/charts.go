@@ -29,12 +29,17 @@ type ChartPayload struct {
 	HasWIP                 bool
 	DefectsJSON            template.JS // empty when no commit data
 	HasDefects             bool
-	ThroughputCutoverIdx   int // -1 if no cutover detected
+	BugFixJSON             template.JS // empty when too few bug-class tickets
+	HasBugFix              bool
+	ProductivityJSON       template.JS // commits-per-active-dev; always present
+	ThroughputCutoverIdx   int         // -1 if no cutover detected
 	AdoptionCutoverIdx     int
+	ProductivityCutoverIdx int
 	CycleCutoverIdx        int
 	RepoAdoptionCutoverIdx int
 	WIPCutoverIdx          int
 	DefectsCutoverIdx      int
+	BugFixCutoverIdx       int
 	// Focus holds per-project scoped copies of the charts above, rendered as
 	// extra slides after each org-wide chart. Empty unless `focus` is set.
 	Focus []FocusChartPayload
@@ -48,20 +53,25 @@ type FocusChartPayload struct {
 
 	ThroughputJSON   template.JS
 	AdoptionJSON     template.JS
+	ProductivityJSON template.JS
 	CycleJSON        template.JS
 	HasCycle         bool
 	WIPJSON          template.JS
 	HasWIP           bool
 	DefectsJSON      template.JS
 	HasDefects       bool
+	BugFixJSON       template.JS
+	HasBugFix        bool
 	RepoAdoptionJSON template.JS
 	HasRepoAdoption  bool
 
 	ThroughputCutoverIdx   int
 	AdoptionCutoverIdx     int
+	ProductivityCutoverIdx int
 	CycleCutoverIdx        int
 	WIPCutoverIdx          int
 	DefectsCutoverIdx      int
+	BugFixCutoverIdx       int
 	RepoAdoptionCutoverIdx int
 }
 
@@ -73,6 +83,7 @@ type FocusData struct {
 	Cycles       []analyze.WeekCycle
 	WIP          []analyze.WIPWeek
 	Defects      []analyze.DefectWeek
+	BugFix       []analyze.BugFixWeek
 	RepoAdoption []analyze.RepoAdoptionWeek
 }
 
@@ -121,7 +132,7 @@ const (
 // BuildChartPayload prepares the ECharts option payloads for the deck. The
 // rendered template hands these to echarts.init().setOption() in the
 // browser. The Go side does no PNG rasterisation.
-func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, focus []FocusData) (ChartPayload, error) {
+func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, bugfix []analyze.BugFixWeek, focus []FocusData) (ChartPayload, error) {
 	if len(weeks) == 0 {
 		return ChartPayload{}, fmt.Errorf("BuildChartPayload: no weekly data")
 	}
@@ -134,6 +145,10 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	if err != nil {
 		return ChartPayload{}, fmt.Errorf("marshal adoption option: %w", err)
 	}
+	prod, err := marshalOption(buildProductivityOption(weeks, cutover))
+	if err != nil {
+		return ChartPayload{}, fmt.Errorf("marshal productivity option: %w", err)
+	}
 	// json.Marshal escapes <, >, & as \u-sequences, so the payload cannot
 	// break out of the enclosing <script>. No untrusted JS lives in either
 	// option map (only numbers, ECharts keywords, and time-formatted
@@ -141,12 +156,15 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	out := ChartPayload{
 		ThroughputJSON:         template.JS(thru),  // #nosec G203 -- JSON-encoded payload, see comment above
 		AdoptionJSON:           template.JS(adopt), // #nosec G203 -- JSON-encoded payload, see comment above
+		ProductivityJSON:       template.JS(prod),  // #nosec G203 -- JSON-encoded payload, see comment above
 		ThroughputCutoverIdx:   cutoverIdx,
 		AdoptionCutoverIdx:     cutoverIdx,
+		ProductivityCutoverIdx: cutoverIdx,
 		CycleCutoverIdx:        -1,
 		RepoAdoptionCutoverIdx: -1,
 		WIPCutoverIdx:          -1,
 		DefectsCutoverIdx:      -1,
+		BugFixCutoverIdx:       -1,
 	}
 	if len(cycles) > 0 {
 		cycle, idx, err := marshalCycleOption(cycles, cutover)
@@ -184,6 +202,18 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 		out.DefectsCutoverIdx = idx
 		out.HasDefects = true
 	}
+	// Bug-fix speed self-suppresses when too few tickets classify as bugs —
+	// this is what hides the slide on trackers that don't supply a bug-shaped
+	// type (Linear, GitLab) instead of rendering a misleading all-"Other" chart.
+	if _, _, bugN := analyze.BugFixLeadTimes(bugfix); bugN >= minBugCycles {
+		b, idx, err := marshalBugFixOption(bugfix, cutover)
+		if err != nil {
+			return ChartPayload{}, fmt.Errorf("marshal bug-fix option: %w", err)
+		}
+		out.BugFixJSON = template.JS(b) // #nosec G203 -- JSON-encoded payload
+		out.BugFixCutoverIdx = idx
+		out.HasBugFix = true
+	}
 	for _, f := range focus {
 		fp, err := buildFocusPayload(f, cutover)
 		if err != nil {
@@ -200,7 +230,7 @@ func buildFocusPayload(f FocusData, cutover analyze.Cutover) (FocusChartPayload,
 	fp := FocusChartPayload{
 		Name: f.Name, Slug: focusSlug(f.Name),
 		ThroughputCutoverIdx: -1, AdoptionCutoverIdx: -1, CycleCutoverIdx: -1,
-		WIPCutoverIdx: -1, DefectsCutoverIdx: -1, RepoAdoptionCutoverIdx: -1,
+		WIPCutoverIdx: -1, DefectsCutoverIdx: -1, BugFixCutoverIdx: -1, RepoAdoptionCutoverIdx: -1,
 	}
 	if len(f.Weeks) > 0 {
 		_, idx := axisLabelsAndCutover(f.Weeks, cutover)
@@ -212,10 +242,16 @@ func buildFocusPayload(f FocusData, cutover analyze.Cutover) (FocusChartPayload,
 		if err != nil {
 			return fp, fmt.Errorf("focus %q adoption: %w", f.Name, err)
 		}
-		fp.ThroughputJSON = template.JS(thru)  // #nosec G203
-		fp.AdoptionJSON = template.JS(adopt)    // #nosec G203
+		prod, err := marshalOption(buildProductivityOption(f.Weeks, cutover))
+		if err != nil {
+			return fp, fmt.Errorf("focus %q productivity: %w", f.Name, err)
+		}
+		fp.ThroughputJSON = template.JS(thru)   // #nosec G203
+		fp.AdoptionJSON = template.JS(adopt)     // #nosec G203
+		fp.ProductivityJSON = template.JS(prod)  // #nosec G203
 		fp.ThroughputCutoverIdx = idx
 		fp.AdoptionCutoverIdx = idx
+		fp.ProductivityCutoverIdx = idx
 	}
 	// "AI-enabled repos" is a portfolio metric — a count of repos per week.
 	// Scoped to a focus's handful of repos it's meaningless, so it's
@@ -237,6 +273,15 @@ func buildFocusPayload(f FocusData, cutover analyze.Cutover) (FocusChartPayload,
 		fp.DefectsJSON = template.JS(d) // #nosec G203
 		fp.DefectsCutoverIdx = idx
 		fp.HasDefects = true
+	}
+	if _, _, bugN := analyze.BugFixLeadTimes(f.BugFix); bugN >= minBugCycles {
+		b, idx, err := marshalBugFixOption(f.BugFix, cutover)
+		if err != nil {
+			return fp, fmt.Errorf("focus %q bug-fix: %w", f.Name, err)
+		}
+		fp.BugFixJSON = template.JS(b) // #nosec G203
+		fp.BugFixCutoverIdx = idx
+		fp.HasBugFix = true
 	}
 	if len(f.Cycles) > 0 {
 		c, idx, err := marshalCycleOption(f.Cycles, cutover)
@@ -307,6 +352,62 @@ func buildDefectsOption(rows []analyze.DefectWeek, cutover analyze.Cutover) (map
 
 func marshalDefectsOption(rows []analyze.DefectWeek, cutover analyze.Cutover) ([]byte, int, error) {
 	opt, idx := buildDefectsOption(rows, cutover)
+	b, err := marshalOption(opt)
+	return b, idx, err
+}
+
+// minBugCycles is the floor of bug-class tickets (with linked commits) below
+// which the bug-fix-speed slide is suppressed — too few to draw a meaningful
+// median trend, and the mechanism that hides the slide for trackers that
+// don't populate a bug-shaped ticket type.
+const minBugCycles = 15
+
+// buildBugFixOption produces the ECharts option for bug-fix speed: median
+// engineering time (dev start → last linked commit), in days, split into
+// bug-class tickets vs everything else. Grouped (not stacked) bars — the two
+// are separate cohorts, not parts of a whole.
+func buildBugFixOption(rows []analyze.BugFixWeek, cutover analyze.Cutover) (map[string]any, int) {
+	labels := make([]string, len(rows))
+	bug := make([]float64, len(rows))
+	other := make([]float64, len(rows))
+	cutoverIdx := -1
+	prevYear := 0
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		bug[i] = roundTo1(r.BugMedianLead.Hours() / 24)
+		other[i] = roundTo1(r.OtherMedianLead.Hours() / 24)
+	}
+
+	bar := func(name string, data []float64) map[string]any {
+		return map[string]any{
+			"name": name, "type": "bar", "data": data,
+			"itemStyle": map[string]any{"borderRadius": []int{3, 3, 0, 0}},
+		}
+	}
+
+	opt := darkChartBase("Bug-fix speed — median engineering days per ISO week", cutover)
+	opt["color"] = []string{chartDefectBug, chartLeadWait}
+	opt["legend"] = darkLegend([]string{"Bug", "Other"})
+	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
+	opt["xAxis"] = darkCategoryAxis(labels)
+	opt["yAxis"] = darkValueAxis(map[string]any{
+		"min":       0,
+		"axisLabel": map[string]any{"formatter": "{value} d", "color": chartMuted},
+	})
+	opt["series"] = []map[string]any{bar("Bug", bug), bar("Other", other)}
+	return opt, cutoverIdx
+}
+
+func marshalBugFixOption(rows []analyze.BugFixWeek, cutover analyze.Cutover) ([]byte, int, error) {
+	opt, idx := buildBugFixOption(rows, cutover)
 	b, err := marshalOption(opt)
 	return b, idx, err
 }
@@ -478,6 +579,38 @@ func buildThroughputOption(weeks []analyze.WeekStats, cutover analyze.Cutover) m
 		opt["legend"] = darkLegend([]string{"Human", "AI-tagged"})
 		opt["series"] = []map[string]any{humanSeries, aiSeries}
 	}
+	return opt
+}
+
+// buildProductivityOption is the throughput chart normalised by active
+// developers — commits per active dev per week, split human vs AI-tagged.
+// Normalising by headcount separates "more output" from "more people".
+func buildProductivityOption(weeks []analyze.WeekStats, cutover analyze.Cutover) map[string]any {
+	labels, _ := axisLabelsAndCutover(weeks, cutover)
+	human := make([]float64, len(weeks))
+	ai := make([]float64, len(weeks))
+	for i, w := range weeks {
+		if w.DistinctAuthors > 0 {
+			d := float64(w.DistinctAuthors)
+			human[i] = roundTo1(float64(w.TotalCommits-w.AICommits) / d)
+			ai[i] = roundTo1(float64(w.AICommits) / d)
+		}
+	}
+	humanSeries := map[string]any{
+		"name": "Human", "type": "bar", "stack": "perdev", "data": human,
+		"itemStyle": map[string]any{"borderRadius": []int{0, 0, 0, 0}},
+	}
+	aiSeries := map[string]any{
+		"name": "AI-tagged", "type": "bar", "stack": "perdev", "data": ai,
+		"itemStyle": map[string]any{"borderRadius": []int{3, 3, 0, 0}},
+	}
+	opt := darkChartBase("Output per active developer — commits/dev per week", cutover)
+	opt["color"] = []string{chartAccent2, chartAccent}
+	opt["legend"] = darkLegend([]string{"Human", "AI-tagged"})
+	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
+	opt["xAxis"] = darkCategoryAxis(labels)
+	opt["yAxis"] = darkValueAxis(nil)
+	opt["series"] = []map[string]any{humanSeries, aiSeries}
 	return opt
 }
 

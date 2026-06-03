@@ -48,3 +48,9 @@ func WindowWIP(rows []WIPWeek, months int) []WIPWeek {
 func WindowDefects(rows []DefectWeek, months int) []DefectWeek {
 	return windowByMonths(rows, months, func(r DefectWeek) time.Time { return r.WeekStart })
 }
+
+// WindowBugFix restricts weekly bug-fix lead-time stats to the last `months`
+// months.
+func WindowBugFix(rows []BugFixWeek, months int) []BugFixWeek {
+	return windowByMonths(rows, months, func(r BugFixWeek) time.Time { return r.WeekStart })
+}

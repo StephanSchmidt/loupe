@@ -29,6 +29,7 @@ const (
 // the last commit.
 type TicketCycle struct {
 	TicketID         string
+	Type             string
 	CreatedAt        time.Time
 	DevStartedAt     time.Time
 	LastDevAt        time.Time
@@ -62,6 +63,10 @@ type CycleConfig struct {
 	DevStartedStatuses []string
 	DoneStatuses       []string
 	AbandonedStatuses  []string
+	// BugTypes are the ticket types (case-insensitive) that classify a
+	// ticket as a defect for the bug-fix-speed chart. Empty disables the
+	// bug/other split.
+	BugTypes []string
 }
 
 // ComputeCycles produces one TicketCycle per ticket that has enough
@@ -128,6 +133,7 @@ func ComputeCyclesScoped(ctx context.Context, s *store.Store, cfg CycleConfig, s
 		}
 		out = append(out, TicketCycle{
 			TicketID:         t.id,
+			Type:             t.typ,
 			CreatedAt:        t.createdAt,
 			DevStartedAt:     devStarted,
 			LastDevAt:        last,
@@ -209,12 +215,13 @@ func normaliseStatuses(in []string) map[string]struct{} {
 
 type ticketForCycle struct {
 	id        string
+	typ       string
 	createdAt time.Time
 }
 
 func loadTicketsForCycle(ctx context.Context, db *sql.DB, scope Scope) ([]ticketForCycle, error) {
 	filt, args := scope.ticketFilter("project_key")
-	rows, err := db.QueryContext(ctx, `SELECT id, created_at FROM tickets WHERE 1=1`+filt, args...)
+	rows, err := db.QueryContext(ctx, `SELECT id, type, created_at FROM tickets WHERE 1=1`+filt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("load tickets: %w", err)
 	}
@@ -222,10 +229,12 @@ func loadTicketsForCycle(ctx context.Context, db *sql.DB, scope Scope) ([]ticket
 	var out []ticketForCycle
 	for rows.Next() {
 		var t ticketForCycle
+		var typ sql.NullString
 		var ts int64
-		if err := rows.Scan(&t.id, &ts); err != nil {
+		if err := rows.Scan(&t.id, &typ, &ts); err != nil {
 			return nil, fmt.Errorf("scan ticket: %w", err)
 		}
+		t.typ = typ.String
 		t.createdAt = time.Unix(ts, 0).UTC()
 		out = append(out, t)
 	}

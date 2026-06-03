@@ -107,6 +107,13 @@ type CycleTimeConfig struct {
 	// excluded from the work-in-progress and lead-time charts entirely.
 	// Empty by default; org-specific (and often confidential) names go here.
 	AbandonedStatuses []string `yaml:"abandoned_statuses"`
+	// BugTypes are the tracker issue/work-item types (matched
+	// case-insensitively) that count as defects for the bug-rate and
+	// bug-fix-speed charts. Defaults to the cross-tracker-common
+	// [Bug, Defect]; non-Jira trackers may need their own term (e.g. a
+	// "bug" label name on GitHub). The bug-fix-speed slide auto-hides when
+	// no tickets match.
+	BugTypes []string `yaml:"bug_types"`
 }
 
 // GitHostConfig holds non-secret coordinates for the git host. The token is
@@ -239,6 +246,11 @@ func (c *Config) applyDefaults() {
 		// Standard Jira terminal statuses only — org-specific names belong in
 		// the user's (private) config, not the published defaults.
 		c.CycleTime.DoneStatuses = []string{"Done", "Closed", "Resolved"}
+	}
+	if len(c.CycleTime.BugTypes) == 0 {
+		// Cross-tracker-common defect type names. Jira/Azure DevOps emit
+		// "Bug"; a GitHub bug label or other tracker term goes in private config.
+		c.CycleTime.BugTypes = []string{"Bug", "Defect"}
 	}
 	if c.Windows.BaselineWeeks == 0 {
 		c.Windows.BaselineWeeks = defaultBaselineWeeks

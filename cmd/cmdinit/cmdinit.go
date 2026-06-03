@@ -52,6 +52,10 @@ cycle_time:
   # Terminal "dropped" statuses excluded from work-in-progress + lead-time.
   # Add your workflow's own (won't-do / archived / cancelled) names here.
   abandoned_statuses: []
+  # Ticket types counted as defects (bug-rate + bug-fix-speed charts). Jira /
+  # Azure DevOps emit "Bug"; on GitHub set this to your bug label's name. The
+  # bug-fix-speed slide auto-hides when no tickets match.
+  bug_types: [Bug, Defect]
 
 windows:
   baseline_weeks: 12

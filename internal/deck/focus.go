@@ -20,6 +20,7 @@ func ComputeFocus(ctx context.Context, s *store.Store, cfg *config.Config) ([]Fo
 		DevStartedStatuses: cfg.CycleTime.DevStartedStatuses,
 		DoneStatuses:       cfg.CycleTime.DoneStatuses,
 		AbandonedStatuses:  cfg.CycleTime.AbandonedStatuses,
+		BugTypes:           cfg.CycleTime.BugTypes,
 	}
 	out := make([]FocusData, 0, len(cfg.Focus))
 	for _, f := range cfg.Focus {
@@ -41,13 +42,17 @@ func ComputeFocus(ctx context.Context, s *store.Store, cfg *config.Config) ([]Fo
 		if err != nil {
 			return nil, fmt.Errorf("focus %q wip: %w", f.Name, err)
 		}
-		defects, err := analyze.WeeklyDefectsScoped(ctx, s, scope)
+		defects, err := analyze.WeeklyDefectsScoped(ctx, s, scope, cfg.CycleTime.BugTypes)
 		if err != nil {
 			return nil, fmt.Errorf("focus %q defects: %w", f.Name, err)
 		}
+		bugfix, err := analyze.WeeklyBugFixScoped(ctx, s, cc, scope)
+		if err != nil {
+			return nil, fmt.Errorf("focus %q bug-fix: %w", f.Name, err)
+		}
 		out = append(out, FocusData{
 			Name: f.DisplayTitle(), Weeks: weeks, Cycles: cycles,
-			RepoAdoption: repoAdoption, WIP: wip, Defects: defects,
+			RepoAdoption: repoAdoption, WIP: wip, Defects: defects, BugFix: bugfix,
 		})
 	}
 	return out, nil

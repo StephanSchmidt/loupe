@@ -90,6 +90,14 @@ cycle_time:
   #   abandoned_statuses: ["Won't Do", "Archived", "Cancelled"]
   abandoned_statuses: []
 
+  # Ticket types (case-insensitive) counted as defects for the bug-rate and
+  # bug-fix-speed charts. Defaults to the cross-tracker-common [Bug, Defect];
+  # Jira and Azure DevOps emit "Bug" natively. Other trackers may need their
+  # own term — e.g. on GitHub the ticket "type" is the first issue label, so
+  # set this to your bug label's name. The Bug-fix-speed slide auto-hides when
+  # no tickets match, so trackers without a bug-shaped type just omit it.
+  bug_types: [Bug, Defect]
+
 windows:
   baseline_weeks: 12
   comparison_weeks: 12

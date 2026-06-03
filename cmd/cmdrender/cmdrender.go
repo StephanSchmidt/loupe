@@ -91,11 +91,13 @@ func renderFromStore(ctx context.Context, out io.Writer, cfg *config.Config, s *
 	if err := os.MkdirAll(filepath.Dir(deckDir), 0o750); err != nil {
 		return fmt.Errorf("create reports dir: %w", err)
 	}
-	cycles, err := analyze.WeeklyCycles(ctx, s, analyze.CycleConfig{
+	cc := analyze.CycleConfig{
 		DevStartedStatuses: cfg.CycleTime.DevStartedStatuses,
 		DoneStatuses:       cfg.CycleTime.DoneStatuses,
 		AbandonedStatuses:  cfg.CycleTime.AbandonedStatuses,
-	})
+		BugTypes:           cfg.CycleTime.BugTypes,
+	}
+	cycles, err := analyze.WeeklyCycles(ctx, s, cc)
 	if err != nil {
 		return fmt.Errorf("weekly cycles: %w", err)
 	}
@@ -107,23 +109,23 @@ func renderFromStore(ctx context.Context, out io.Writer, cfg *config.Config, s *
 	if err != nil {
 		return fmt.Errorf("repo adoption: %w", err)
 	}
-	wip, err := analyze.WeeklyWIP(ctx, s, analyze.CycleConfig{
-		DevStartedStatuses: cfg.CycleTime.DevStartedStatuses,
-		DoneStatuses:       cfg.CycleTime.DoneStatuses,
-		AbandonedStatuses:  cfg.CycleTime.AbandonedStatuses,
-	})
+	wip, err := analyze.WeeklyWIP(ctx, s, cc)
 	if err != nil {
 		return fmt.Errorf("work in progress: %w", err)
 	}
-	defects, err := analyze.WeeklyDefects(ctx, s)
+	defects, err := analyze.WeeklyDefects(ctx, s, cfg.CycleTime.BugTypes)
 	if err != nil {
 		return fmt.Errorf("defects: %w", err)
+	}
+	bugfix, err := analyze.WeeklyBugFix(ctx, s, cc)
+	if err != nil {
+		return fmt.Errorf("bug-fix speed: %w", err)
 	}
 	focus, err := deck.ComputeFocus(ctx, s, cfg)
 	if err != nil {
 		return fmt.Errorf("focus: %w", err)
 	}
-	if err := deck.RenderDeck(deckDir, cfg, weeks, cutover, cycles, repoAdoption, wip, defects, focus, tools, time.Now().UTC()); err != nil {
+	if err := deck.RenderDeck(deckDir, cfg, weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, focus, tools, time.Now().UTC()); err != nil {
 		return fmt.Errorf("render deck: %w", err)
 	}
 	_, _ = fmt.Fprintf(out, "Deck ready: %s/index.html\n", deckDir)
