@@ -24,6 +24,12 @@ type TrackerFilter struct {
 	// issues are fetched. For GitHub the key is "owner/repo"; for Jira
 	// it is the project key (e.g. "ENG").
 	Project string
+
+	// Since overrides the per-project watermark for this run. When non-zero,
+	// issues are fetched from this point regardless of the stored
+	// last_issue_indexed_at — used by `loupe run --since`. The zero value
+	// keeps the normal watermark-incremental behaviour.
+	Since time.Time
 }
 
 // IngestTracker walks t's projects → issues and persists rows into s.
@@ -47,9 +53,13 @@ func IngestTracker(ctx context.Context, s *store.Store, t tracker.Tracker, progr
 		}
 		stats.Projects++
 
-		since, err := readProjectWatermark(ctx, s.DB(), provider, p.Key)
-		if err != nil {
-			return stats, err
+		since := filter.Since
+		if since.IsZero() {
+			var err error
+			since, err = readProjectWatermark(ctx, s.DB(), provider, p.Key)
+			if err != nil {
+				return stats, err
+			}
 		}
 		nIssues := 0
 		for iss, streamErr := range t.ListIssues(ctx, p.Key, since) {

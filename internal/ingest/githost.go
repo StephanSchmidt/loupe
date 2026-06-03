@@ -66,6 +66,13 @@ type GitHostFilter struct {
 	// (one extra API call per PR), so it is opt-in: callers pass the value
 	// of ai_adoption.detection.squash_merge_recovery here.
 	SquashMergeRecovery bool
+
+	// Since overrides the per-repo watermark for this run. When non-zero,
+	// commits and PRs are fetched from this point regardless of the stored
+	// last_commit_indexed_at / last_pr_indexed_at — used by `loupe run
+	// --since` to re-pull a window. The zero value keeps the normal
+	// watermark-incremental behaviour.
+	Since time.Time
 }
 
 // IngestGitHost walks gh's discovery surface (workspaces → repos → commits
@@ -167,7 +174,7 @@ func ingestWorkspace(
 		}
 		repo := repo
 		g.Go(func() error {
-			nCommits, nPRs, err := ingestRepo(gctx, db, gh, provider, repo, now, reporter, filter.SquashMergeRecovery)
+			nCommits, nPRs, err := ingestRepo(gctx, db, gh, provider, repo, now, reporter, filter.SquashMergeRecovery, filter.Since)
 			if err != nil {
 				return err
 			}
@@ -202,6 +209,7 @@ func ingestRepo(
 	now int64,
 	reporter progress.Reporter,
 	squashRecovery bool,
+	sinceOverride time.Time,
 ) (nCommits, nPRs int, err error) {
 	if err := upsertRepo(ctx, db, provider, repo, now); err != nil {
 		return 0, 0, err
@@ -220,12 +228,12 @@ func ingestRepo(
 	// (fail-fast) via the group's context.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		n, err := streamRepoCommits(gctx, db, gh, provider, repo, reporter)
+		n, err := streamRepoCommits(gctx, db, gh, provider, repo, sinceOverride, reporter)
 		nCommits = n
 		return err
 	})
 	g.Go(func() error {
-		n, err := streamRepoPRs(gctx, db, gh, provider, repo, squashRecovery, reporter)
+		n, err := streamRepoPRs(gctx, db, gh, provider, repo, squashRecovery, sinceOverride, reporter)
 		nPRs = n
 		return err
 	})
@@ -244,10 +252,14 @@ func ingestRepo(
 	return nCommits, nPRs, nil
 }
 
-func streamRepoCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, reporter progress.Reporter) (int, error) {
-	since, err := readRepoWatermark(ctx, db, provider, repo.FullName(), "last_commit_indexed_at")
-	if err != nil {
-		return 0, err
+func streamRepoCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, sinceOverride time.Time, reporter progress.Reporter) (int, error) {
+	since := sinceOverride
+	if since.IsZero() {
+		var err error
+		since, err = readRepoWatermark(ctx, db, provider, repo.FullName(), "last_commit_indexed_at")
+		if err != nil {
+			return 0, err
+		}
 	}
 	n := 0
 	for commit, streamErr := range gh.ListCommits(ctx, repo.RepoRef, since) {
@@ -265,10 +277,14 @@ func streamRepoCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, prov
 	return n, nil
 }
 
-func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, squashRecovery bool, reporter progress.Reporter) (int, error) {
-	since, err := readRepoWatermark(ctx, db, provider, repo.FullName(), "last_pr_indexed_at")
-	if err != nil {
-		return 0, err
+func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, squashRecovery bool, sinceOverride time.Time, reporter progress.Reporter) (int, error) {
+	since := sinceOverride
+	if since.IsZero() {
+		var err error
+		since, err = readRepoWatermark(ctx, db, provider, repo.FullName(), "last_pr_indexed_at")
+		if err != nil {
+			return 0, err
+		}
 	}
 	n := 0
 	for pr, streamErr := range gh.ListPullRequests(ctx, repo.RepoRef, since) {
