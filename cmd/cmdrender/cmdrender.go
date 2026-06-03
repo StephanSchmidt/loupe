@@ -93,6 +93,8 @@ func renderFromStore(ctx context.Context, out io.Writer, cfg *config.Config, s *
 	}
 	cycles, err := analyze.WeeklyCycles(ctx, s, analyze.CycleConfig{
 		DevStartedStatuses: cfg.CycleTime.DevStartedStatuses,
+		DoneStatuses:       cfg.CycleTime.DoneStatuses,
+		AbandonedStatuses:  cfg.CycleTime.AbandonedStatuses,
 	})
 	if err != nil {
 		return fmt.Errorf("weekly cycles: %w", err)
@@ -101,7 +103,27 @@ func renderFromStore(ctx context.Context, out io.Writer, cfg *config.Config, s *
 	if err != nil {
 		return fmt.Errorf("tool breakdown: %w", err)
 	}
-	if err := deck.RenderDeck(deckDir, cfg, weeks, cutover, cycles, tools, time.Now().UTC()); err != nil {
+	repoAdoption, err := analyze.WeeklyRepoAdoption(ctx, s)
+	if err != nil {
+		return fmt.Errorf("repo adoption: %w", err)
+	}
+	wip, err := analyze.WeeklyWIP(ctx, s, analyze.CycleConfig{
+		DevStartedStatuses: cfg.CycleTime.DevStartedStatuses,
+		DoneStatuses:       cfg.CycleTime.DoneStatuses,
+		AbandonedStatuses:  cfg.CycleTime.AbandonedStatuses,
+	})
+	if err != nil {
+		return fmt.Errorf("work in progress: %w", err)
+	}
+	defects, err := analyze.WeeklyDefects(ctx, s)
+	if err != nil {
+		return fmt.Errorf("defects: %w", err)
+	}
+	focus, err := deck.ComputeFocus(ctx, s, cfg)
+	if err != nil {
+		return fmt.Errorf("focus: %w", err)
+	}
+	if err := deck.RenderDeck(deckDir, cfg, weeks, cutover, cycles, repoAdoption, wip, defects, focus, tools, time.Now().UTC()); err != nil {
 		return fmt.Errorf("render deck: %w", err)
 	}
 	_, _ = fmt.Fprintf(out, "Deck ready: %s/index.html\n", deckDir)

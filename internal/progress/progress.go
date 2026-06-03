@@ -23,6 +23,10 @@ type Reporter interface {
 	WorkspaceFound(workspace string, visible, total int)
 	// RepoStart marks a repo as actively ingesting.
 	RepoStart(fullName string)
+	// RepoProgress reports a repo's running commit/PR counts mid-ingest so a
+	// long repo visibly ticks instead of looking hung. Pass -1 to leave a
+	// field unchanged.
+	RepoProgress(fullName string, commits, prs int)
 	// RepoBackoff reports that a repo's requests are being retried after a
 	// 429/5xx, sleeping for delay before attempt number `attempt`.
 	RepoBackoff(fullName string, attempt int, delay time.Duration)
@@ -41,6 +45,7 @@ type nopReporter struct{}
 func (nopReporter) Listing(string)                          {}
 func (nopReporter) WorkspaceFound(string, int, int)         {}
 func (nopReporter) RepoStart(string)                        {}
+func (nopReporter) RepoProgress(string, int, int)           {}
 func (nopReporter) RepoBackoff(string, int, time.Duration)  {}
 func (nopReporter) RepoDone(string, int, int)               {}
 func (nopReporter) Stop()                                   {}
@@ -72,6 +77,10 @@ func (p *plainReporter) WorkspaceFound(ws string, visible, total int) {
 }
 
 func (p *plainReporter) RepoStart(name string) { p.line("    → %s", name) }
+
+// RepoProgress is a no-op for plain output — it would spam the log; the
+// per-repo completion line carries the final counts.
+func (p *plainReporter) RepoProgress(string, int, int) {}
 
 func (p *plainReporter) RepoBackoff(name string, attempt int, d time.Duration) {
 	p.line("    ⏳ %s: rate limited, retrying in %s (attempt %d)", name, d.Round(time.Second), attempt)

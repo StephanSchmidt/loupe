@@ -46,6 +46,13 @@ ai_adoption:
     pr_labels: [ai-assisted]
   min_weekly_commits_for_cutover: 0.05
 
+cycle_time:
+  dev_started_statuses: [In Progress, In Development, In Review, Code Review]
+  done_statuses: [Done, Closed, Resolved]
+  # Terminal "dropped" statuses excluded from work-in-progress + lead-time.
+  # Add your workflow's own (won't-do / archived / cancelled) names here.
+  abandoned_statuses: []
+
 windows:
   baseline_weeks: 12
   comparison_weeks: 12

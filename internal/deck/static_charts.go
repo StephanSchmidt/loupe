@@ -7,13 +7,24 @@ package deck
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"strconv"
 
 	"github.com/go-analyze/charts"
 
 	"github.com/StephanSchmidt/loupe/internal/analyze"
 )
+
+// intValueAxis renders the y-axis labels as whole numbers — count charts
+// (open issues, repos, commits) otherwise show decimal gridlines like
+// "5.000" or "0.1" from the library's automatic tick division.
+func intValueAxis() []charts.ValueAxisOption {
+	return []charts.ValueAxisOption{{
+		ValueFormatter: func(v float64) string { return strconv.FormatInt(int64(math.Round(v)), 10) },
+	}}
+}
 
 const (
 	staticChartWidth  = 1200
@@ -28,7 +39,7 @@ var staticChartFormats = []string{"png", "svg"}
 // is available) cycle charts under chartsDir in every format in
 // staticChartFormats. PNG is the paste-into-Slack default; SVG is for
 // high-resolution embedding.
-func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, chartsDir string) error {
+func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, chartsDir string) error {
 	if len(weeks) == 0 {
 		return fmt.Errorf("RenderStaticCharts: no weekly data")
 	}
@@ -45,6 +56,24 @@ func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycl
 		if err := renderStaticAdoption(weeks, cutover, adopt, format); err != nil {
 			return fmt.Errorf("adoption %s: %w", format, err)
 		}
+		if len(repoAdoption) > 0 {
+			ra := filepath.Join(chartsDir, "repo-adoption."+format)
+			if err := renderStaticRepoAdoption(repoAdoption, cutover, ra, format); err != nil {
+				return fmt.Errorf("repo adoption %s: %w", format, err)
+			}
+		}
+		if len(wip) > 0 {
+			w := filepath.Join(chartsDir, "wip."+format)
+			if err := renderStaticWIP(wip, cutover, w, format); err != nil {
+				return fmt.Errorf("wip %s: %w", format, err)
+			}
+		}
+		if len(defects) > 0 {
+			d := filepath.Join(chartsDir, "defects."+format)
+			if err := renderStaticDefects(defects, cutover, d, format); err != nil {
+				return fmt.Errorf("defects %s: %w", format, err)
+			}
+		}
 		if len(cycles) == 0 {
 			continue
 		}
@@ -54,6 +83,162 @@ func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycl
 		}
 	}
 	return nil
+}
+
+func renderStaticDefects(rows []analyze.DefectWeek, cutover analyze.Cutover, outPath, format string) error {
+	labels := make([]string, len(rows))
+	revert := make([]float64, len(rows))
+	bug := make([]float64, len(rows))
+	hasBugs := false
+	prevYear := 0
+	cutoverIdx := -1
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		revert[i] = r.RevertRate()
+		bug[i] = r.BugRate()
+		if r.Tickets > 0 {
+			hasBugs = true
+		}
+	}
+	if cutoverIdx >= 0 {
+		labels[cutoverIdx] = "▼ " + labels[cutoverIdx]
+	}
+
+	series := [][]float64{revert}
+	names := []string{"Revert rate %"}
+	if hasBugs {
+		series = append(series, bug)
+		names = append(names, "Bug rate %")
+	}
+	// Grouped bars (StackSeries left unset) — the two rates use different
+	// denominators, so stacking would be meaningless.
+	opt := charts.NewBarChartOptionWithData(series)
+	opt.Title = charts.TitleOption{Text: "Quality counterweight — revert & bug rate"}
+	if cutover.Detected {
+		opt.Title.Subtext = fmt.Sprintf("AI adoption cutover: %s (%s)",
+			cutover.Date.Format("Jan 2, 2006"), cutover.Reason)
+	}
+	opt.CategoryAxis = charts.CategoryAxisOption{
+		Labels:        labels,
+		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
+	}
+	opt.Legend = charts.LegendOption{SeriesNames: names}
+
+	p := charts.NewPainter(charts.PainterOptions{
+		Width:        staticChartWidth,
+		Height:       staticChartHeight,
+		OutputFormat: format,
+	})
+	if err := p.BarChart(opt); err != nil {
+		return fmt.Errorf("bar chart: %w", err)
+	}
+	return writeStaticChart(p, outPath)
+}
+
+func renderStaticWIP(rows []analyze.WIPWeek, cutover analyze.Cutover, outPath, format string) error {
+	labels := make([]string, len(rows))
+	inProg := make([]float64, len(rows))
+	notStarted := make([]float64, len(rows))
+	prevYear := 0
+	cutoverIdx := -1
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		inProg[i] = float64(r.InProgress)
+		notStarted[i] = float64(r.NotStarted)
+	}
+	if cutoverIdx >= 0 {
+		labels[cutoverIdx] = "▼ " + labels[cutoverIdx]
+	}
+
+	opt := charts.NewBarChartOptionWithData([][]float64{inProg, notStarted})
+	opt.StackSeries = charts.Ptr(true)
+	opt.Title = charts.TitleOption{Text: "Work in progress — open issues"}
+	opt.Title.Subtext = "Snapshot at end of each ISO week"
+	opt.CategoryAxis = charts.CategoryAxisOption{
+		Labels:        labels,
+		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
+	}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"In Progress", "Not Started"}}
+	opt.YAxis = intValueAxis()
+
+	p := charts.NewPainter(charts.PainterOptions{
+		Width:        staticChartWidth,
+		Height:       staticChartHeight,
+		OutputFormat: format,
+	})
+	if err := p.BarChart(opt); err != nil {
+		return fmt.Errorf("bar chart: %w", err)
+	}
+	return writeStaticChart(p, outPath)
+}
+
+func renderStaticRepoAdoption(rows []analyze.RepoAdoptionWeek, cutover analyze.Cutover, outPath, format string) error {
+	labels := make([]string, len(rows))
+	ai := make([]float64, len(rows))
+	active := make([]float64, len(rows))
+	inactive := make([]float64, len(rows))
+	prevYear := 0
+	cutoverIdx := -1
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		ai[i] = float64(r.AIEnabled)
+		active[i] = float64(r.Active)
+		inactive[i] = float64(r.Inactive)
+	}
+	if cutoverIdx >= 0 {
+		labels[cutoverIdx] = "▼ " + labels[cutoverIdx]
+	}
+
+	opt := charts.NewBarChartOptionWithData([][]float64{ai, active, inactive})
+	opt.StackSeries = charts.Ptr(true)
+	opt.Title = charts.TitleOption{Text: "AI-enabled repos"}
+	if cutover.Detected {
+		opt.Title.Subtext = fmt.Sprintf("AI adoption cutover: %s (%s)",
+			cutover.Date.Format("Jan 2, 2006"), cutover.Reason)
+	}
+	opt.CategoryAxis = charts.CategoryAxisOption{
+		Labels:        labels,
+		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
+	}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"AI-enabled", "Active (≤90d)", "Inactive (>90d)"}}
+	opt.YAxis = intValueAxis()
+
+	p := charts.NewPainter(charts.PainterOptions{
+		Width:        staticChartWidth,
+		Height:       staticChartHeight,
+		OutputFormat: format,
+	})
+	if err := p.BarChart(opt); err != nil {
+		return fmt.Errorf("bar chart: %w", err)
+	}
+	return writeStaticChart(p, outPath)
 }
 
 func renderStaticThroughput(weeks []analyze.WeekStats, cutover analyze.Cutover, outPath, format string) error {
@@ -78,6 +263,7 @@ func renderStaticThroughput(weeks []analyze.WeekStats, cutover analyze.Cutover, 
 		LabelCount:    staticLabelCount(len(labels)),
 	}
 	opt.Legend = charts.LegendOption{SeriesNames: []string{"Human", "AI-tagged"}}
+	opt.YAxis = intValueAxis()
 
 	p := charts.NewPainter(charts.PainterOptions{
 		Width:        staticChartWidth,
@@ -92,31 +278,37 @@ func renderStaticThroughput(weeks []analyze.WeekStats, cutover analyze.Cutover, 
 
 func renderStaticAdoption(weeks []analyze.WeekStats, cutover analyze.Cutover, outPath, format string) error {
 	labels, _ := buildStaticLabels(weeks, cutover)
-	pct := make([]float64, len(weeks))
+	human := make([]float64, len(weeks))
+	ai := make([]float64, len(weeks))
 	for i, w := range weeks {
-		pct[i] = w.AdoptionRatio() * 100
+		if w.TotalCommits > 0 {
+			t := float64(w.TotalCommits)
+			human[i] = float64(w.TotalCommits-w.AICommits) / t * 100
+			ai[i] = float64(w.AICommits) / t * 100
+		}
 	}
 
-	opt := charts.NewLineChartOptionWithData([][]float64{pct})
-	opt.Title = charts.TitleOption{Text: "AI adoption — % of weekly active devs"}
+	opt := charts.NewBarChartOptionWithData([][]float64{human, ai})
+	opt.StackSeries = charts.Ptr(true)
+	opt.Title = charts.TitleOption{Text: "AI adoption — % of weekly commits"}
 	if cutover.Detected {
 		opt.Title.Subtext = fmt.Sprintf("Cutover: %s (%s)",
 			cutover.Date.Format("Jan 2, 2006"), cutover.Reason)
 	}
-	opt.XAxis = charts.XAxisOption{
+	opt.CategoryAxis = charts.CategoryAxisOption{
 		Labels:        labels,
 		LabelRotation: charts.DegreesToRadians(45),
 		LabelCount:    staticLabelCount(len(labels)),
 	}
-	opt.Legend = charts.LegendOption{SeriesNames: []string{"AI-using devs %"}}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"Human", "AI-tagged"}}
 
 	p := charts.NewPainter(charts.PainterOptions{
 		Width:        staticChartWidth,
 		Height:       staticChartHeight,
 		OutputFormat: format,
 	})
-	if err := p.LineChart(opt); err != nil {
-		return fmt.Errorf("line chart: %w", err)
+	if err := p.BarChart(opt); err != nil {
+		return fmt.Errorf("bar chart: %w", err)
 	}
 	return writeStaticChart(p, outPath)
 }
@@ -146,7 +338,7 @@ func renderStaticCycle(cycles []analyze.WeekCycle, cutover analyze.Cutover, outP
 
 	opt := charts.NewBarChartOptionWithData([][]float64{dev, idea})
 	opt.StackSeries = charts.Ptr(true)
-	opt.Title = charts.TitleOption{Text: "Cycle time per week (median days)"}
+	opt.Title = charts.TitleOption{Text: "Lead time — median days per ISO week"}
 	if cutover.Detected {
 		opt.Title.Subtext = fmt.Sprintf("AI adoption cutover: %s (%s)",
 			cutover.Date.Format("Jan 2, 2006"), cutover.Reason)
@@ -156,7 +348,7 @@ func renderStaticCycle(cycles []analyze.WeekCycle, cutover analyze.Cutover, outP
 		LabelRotation: charts.DegreesToRadians(45),
 		LabelCount:    staticLabelCount(len(labels)),
 	}
-	opt.Legend = charts.LegendOption{SeriesNames: []string{"Dev → Release", "Idea → Dev"}}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"Cycle (dev start → last commit)", "Wait (Create → dev start)"}}
 
 	p := charts.NewPainter(charts.PainterOptions{
 		Width:        staticChartWidth,

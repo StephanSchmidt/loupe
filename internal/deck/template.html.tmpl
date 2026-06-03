@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="color-scheme" content="dark">
-<title>{{ .OrgName }} — AI Impact Report</title>
+<title>{{ .Title }} — AI Impact Report</title>
 <link rel="stylesheet" href="assets/reveal.css">
 <style>
   :root {
@@ -261,7 +261,7 @@
 <section>
   <div class="title-slide">
     <p class="eyebrow">AI Impact Report</p>
-    <h1>{{ .OrgName }}</h1>
+    <h1>{{ .Title }}</h1>
     <p class="date">Week of {{ .ReportDate.Format "January 2, 2006" }}</p>
     <p class="footnote">Window: {{ .WindowStart.Format "Jan 02, 2006" }} – {{ .WindowEnd.Format "Jan 02, 2006" }}</p>
   </div>
@@ -299,14 +299,45 @@
     Commits per week, stacked human vs AI-tagged. Merge commits included. A truncated rightmost bar usually reflects a partial week.
   </aside>
 </section>
+{{ range .Charts.Focus }}{{ if .ThroughputJSON }}
+<section data-chart="throughput--{{ .Slug }}">
+  <h2>Weekly throughput — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
 
 <section data-chart="adoption">
   <h2>Adoption over time</h2>
   <div id="adoption-chart" class="chart"></div>
   <aside class="notes">
-    Percentage of active devs per week with at least one AI-tagged commit. The shape of the curve matters more than any single point.
+    Share of each week's commits that are human vs AI-tagged. The growing AI band matters more than any single week.
   </aside>
 </section>
+{{ range .Charts.Focus }}{{ if .AdoptionJSON }}
+<section data-chart="adoption--{{ .Slug }}">
+  <h2>Adoption over time — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
+
+{{ if .Charts.HasRepoAdoption }}
+<section data-chart="repoadoption">
+  <h2>AI-enabled repos</h2>
+  <div id="repoadoption-chart" class="chart"></div>
+  <p class="footnote">
+    <span class="accent">{{ .RepoAdoptionAdopted }} of {{ .RepoAdoptionTotal }}</span> repos have at least one AI commit. First adoption is a floor — once a repo shows AI it stays counted, regardless of later activity.
+  </p>
+  <aside class="notes">
+    Per ISO week: repos with ≥1 AI commit (cumulative), with the remaining repos split by whether they committed in the last 90 days.
+  </aside>
+</section>
+{{ range .Charts.Focus }}{{ if .HasRepoAdoption }}
+<section data-chart="repoadoption--{{ .Slug }}">
+  <h2>AI-enabled repos — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
+{{ end }}
 
 {{ if .StatsAvailable }}
 <section>
@@ -403,16 +434,60 @@
 
 {{ if .CyclesAvailable }}
 <section data-chart="cycle">
-  <h2>Cycle time</h2>
+  <h2>Lead time</h2>
   <div id="cycle-chart" class="chart"></div>
   <p class="footnote">
-    {{ .CycleTickets }} tickets with cycle data — median Idea → Dev <span class="accent">{{ .MedianIdeaToDevText }}</span>, median Dev → Release <span class="accent">{{ .MedianDevToRelText }}</span>.
+    {{ .CycleTickets }} tickets with lead-time data — median Wait (Create → dev start) <span class="accent">{{ .MedianIdeaToDevText }}</span>, median Cycle (dev start → last commit) <span class="accent">{{ .MedianDevToRelText }}</span>.
     {{ printf "%.0f%%" .CycleFallbackPct }} of tickets used first-commit fallback (no matching tracker transition).
   </p>
   <aside class="notes">
-    Idea → Dev is ticket created → first tracker transition into a "dev started" status (or first commit, when no matching transition exists). Dev → Release is that moment → last commit on the ticket.
+    Wait is ticket created → first tracker transition into a "dev started" status (or first commit, when no matching transition exists). Cycle is that moment → last commit on the ticket. Bars show the weekly median, so a few long-tail tickets don't distort the typical lead time.
   </aside>
 </section>
+{{ range .Charts.Focus }}{{ if .HasCycle }}
+<section data-chart="cycle--{{ .Slug }}">
+  <h2>Lead time — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
+{{ end }}
+
+{{ if .Charts.HasWIP }}
+<section data-chart="wip">
+  <h2>Work in progress</h2>
+  <div id="wip-chart" class="chart"></div>
+  <aside class="notes">
+    Snapshot at the end of each ISO week of open tickets (created, not yet Done/Closed/Resolved), split by whether they've entered a "dev started" status. Rising "Not Started" signals a growing backlog.
+  </aside>
+</section>
+{{ range .Charts.Focus }}{{ if .HasWIP }}
+<section data-chart="wip--{{ .Slug }}">
+  <h2>Work in progress — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
+{{ end }}
+
+{{ if .Charts.HasDefects }}
+<section data-chart="defects">
+  <h2>Quality counterweight</h2>
+  <div id="defects-chart" class="chart"></div>
+  <p class="footnote">
+    <strong>Revert rate</strong> = commits whose message starts “Revert ” ÷ all commits.{{ if .DefectsHasBugs }} <strong>Bug rate</strong> = Jira <code>Bug</code> tickets ÷ all tickets created that week.{{ end }}
+  </p>
+  <p class="footnote">
+    {{ if .DefectsHasCutover }}Revert rate <span class="accent">{{ printf "%.1f%%" .RevertRateBefore }}</span> before AI → <span class="accent">{{ printf "%.1f%%" .RevertRateAfter }}</span> after.{{ if .DefectsHasBugs }} Bug rate {{ printf "%.1f%%" .BugRateBefore }} → {{ printf "%.1f%%" .BugRateAfter }}.{{ end }}{{ else }}Revert rate <span class="accent">{{ printf "%.1f%%" .RevertRateOverall }}</span>{{ if .DefectsHasBugs }}, bug rate {{ printf "%.1f%%" .BugRateOverall }}{{ end }} over the window.{{ end }}
+  </p>
+  <aside class="notes">
+    Revert rate = commits whose message starts "Revert " — a floor, since roll-forward fixes and squash-hidden reverts are missed. Bug rate = Jira tickets of type Bug as a share of tickets created that week; it lags the work that caused it. Read this as a directional counterweight to the throughput gains, not a precise defect count.
+  </aside>
+</section>
+{{ range .Charts.Focus }}{{ if .HasDefects }}
+<section data-chart="defects--{{ .Slug }}">
+  <h2>Quality counterweight — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
 {{ end }}
 
 <section>
@@ -443,8 +518,9 @@
   <div class="caveats">
     <h4>Not in this report yet</h4>
     <ul>
-      <li>Cycle time (needs Jira tickets + Bitbucket PRs)</li>
-      <li>Defect rate / quality counterweight</li>
+      {{ if not .Charts.HasCycle }}<li>Lead time (needs Jira tickets with status transitions)</li>{{ end }}
+      {{ if not .Charts.HasWIP }}<li>Work in progress (needs Jira tickets)</li>{{ end }}
+      {{ if not .Charts.HasDefects }}<li>Defect rate / quality counterweight</li>{{ end }}
       <li>Per-team breakdown</li>
     </ul>
     <p>Cutover threshold: a week qualifies when AI-tagged commits reach <span class="accent">{{ printf "%.0f%%" .CutoverThresholdPct }}</span> of weekly commits.</p>
@@ -464,6 +540,9 @@
   // verbatim via template.JS — JSON object literals are valid JS.
   const throughputOption = {{ .Charts.ThroughputJSON }};
   const adoptionOption = {{ .Charts.AdoptionJSON }};
+  {{ if .Charts.HasRepoAdoption }}const repoAdoptionOption = {{ .Charts.RepoAdoptionJSON }};{{ end }}
+  {{ if .Charts.HasWIP }}const wipOption = {{ .Charts.WIPJSON }};{{ end }}
+  {{ if .Charts.HasDefects }}const defectsOption = {{ .Charts.DefectsJSON }};{{ end }}
   {{ if .Charts.HasCycle }}const cycleOption = {{ .Charts.CycleJSON }};{{ end }}
 
   // Cutover indices come alongside the option payloads. The cutover
@@ -473,12 +552,34 @@
   const chartOptions = {
     throughput: throughputOption,
     adoption: adoptionOption,
+    {{ if .Charts.HasRepoAdoption }}repoadoption: repoAdoptionOption,{{ end }}
+    {{ if .Charts.HasWIP }}wip: wipOption,{{ end }}
+    {{ if .Charts.HasDefects }}defects: defectsOption,{{ end }}
     {{ if .Charts.HasCycle }}cycle: cycleOption,{{ end }}
+    {{ range .Charts.Focus }}
+    {{ if .ThroughputJSON }}"throughput--{{ .Slug }}": {{ .ThroughputJSON }},{{ end }}
+    {{ if .AdoptionJSON }}"adoption--{{ .Slug }}": {{ .AdoptionJSON }},{{ end }}
+    {{ if .HasRepoAdoption }}"repoadoption--{{ .Slug }}": {{ .RepoAdoptionJSON }},{{ end }}
+    {{ if .HasWIP }}"wip--{{ .Slug }}": {{ .WIPJSON }},{{ end }}
+    {{ if .HasDefects }}"defects--{{ .Slug }}": {{ .DefectsJSON }},{{ end }}
+    {{ if .HasCycle }}"cycle--{{ .Slug }}": {{ .CycleJSON }},{{ end }}
+    {{ end }}
   };
   const cutoverIdx = {
     throughput: {{ .Charts.ThroughputCutoverIdx }},
     adoption: {{ .Charts.AdoptionCutoverIdx }},
+    {{ if .Charts.HasRepoAdoption }}repoadoption: {{ .Charts.RepoAdoptionCutoverIdx }},{{ end }}
+    {{ if .Charts.HasWIP }}wip: {{ .Charts.WIPCutoverIdx }},{{ end }}
+    {{ if .Charts.HasDefects }}defects: {{ .Charts.DefectsCutoverIdx }},{{ end }}
     {{ if .Charts.HasCycle }}cycle: {{ .Charts.CycleCutoverIdx }},{{ end }}
+    {{ range .Charts.Focus }}
+    {{ if .ThroughputJSON }}"throughput--{{ .Slug }}": {{ .ThroughputCutoverIdx }},{{ end }}
+    {{ if .AdoptionJSON }}"adoption--{{ .Slug }}": {{ .AdoptionCutoverIdx }},{{ end }}
+    {{ if .HasRepoAdoption }}"repoadoption--{{ .Slug }}": {{ .RepoAdoptionCutoverIdx }},{{ end }}
+    {{ if .HasWIP }}"wip--{{ .Slug }}": {{ .WIPCutoverIdx }},{{ end }}
+    {{ if .HasDefects }}"defects--{{ .Slug }}": {{ .DefectsCutoverIdx }},{{ end }}
+    {{ if .HasCycle }}"cycle--{{ .Slug }}": {{ .CycleCutoverIdx }},{{ end }}
+    {{ end }}
   };
   const chartInstances = {};
 
@@ -519,6 +620,10 @@
           id: 'cutover',
           type: 'group',
           silent: true,
+          // zlevel lifts the marker into its own canvas layer so it draws
+          // ON TOP of the series — full-height stacked bars otherwise cover
+          // both the line and the label.
+          zlevel: 1,
           z: 100,
           children: [
             {
@@ -528,7 +633,7 @@
             },
             {
               type: 'rect',
-              shape: { x: pillX, y: yTop - 12, width: 120, height: 22 },
+              shape: { x: pillX, y: yTop - 32, width: 120, height: 22 },
               style: { fill: '#ef4444' }
             },
             {
@@ -539,7 +644,7 @@
                 fontWeight: 'bold',
                 fontSize: 13,
                 x: textX,
-                y: yTop - 1,
+                y: yTop - 21,
                 textAlign: 'center',
                 textVerticalAlign: 'middle'
               }

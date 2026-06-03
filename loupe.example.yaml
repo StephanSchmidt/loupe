@@ -1,4 +1,5 @@
 org: acme-eng        # for bitbucket-cloud this is the Bitbucket workspace slug
+# title: Acme Engineering   # deck headline (the deck adds "AI Impact Report"); falls back to org
 
 git_host:
   provider: bitbucket-cloud
@@ -76,6 +77,19 @@ cycle_time:
   # commit.
   dev_started_statuses: [In Progress, In Development, In Review, Code Review]
 
+  # Statuses that mark a ticket resolved. Used (alongside the resolved/closed
+  # timestamps Jira sets automatically) to drop tickets out of the
+  # work-in-progress and lead-time charts.
+  done_statuses: [Done, Closed, Resolved]
+
+  # Terminal "dropped" statuses — won't-do, archived, cancelled, etc. Tickets
+  # reaching any of these count as neither open nor done; they're excluded
+  # from the work-in-progress and lead-time charts entirely. Empty by
+  # default — add your workflow's own names here (this stays in your private
+  # config; it is never published).
+  #   abandoned_statuses: ["Won't Do", "Archived", "Cancelled"]
+  abandoned_statuses: []
+
 windows:
   baseline_weeks: 12
   comparison_weeks: 12
@@ -84,6 +98,15 @@ windows:
   # hidden from the time-series charts so the axes stay readable. The
   # --months flag overrides this per run.
   display_months: 6
+
+# Optional per-project lenses. Each renders a scoped copy of every
+# time-series chart immediately after its org-wide slide. Omit to get just
+# the org-wide deck.
+#   focus:
+#     - name: payments                 # identifier
+#       title: Payments                # slide label (falls back to name)
+#       tracker_project: PAY           # Jira project key → scopes ticket charts
+#       repos: [payments-api]          # Bitbucket repo slug(s) → scopes commit charts
 
 output:
   path: ./reports

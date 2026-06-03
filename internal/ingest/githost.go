@@ -30,6 +30,13 @@ import (
 // tripping rate limits.
 const repoIngestConcurrency = 8
 
+// progressEvery / progressEveryPR throttle mid-repo progress reports so a
+// large repo's running counts tick visibly without flooding the reporter.
+const (
+	progressEvery   = 100
+	progressEveryPR = 25
+)
+
 // ErrInterrupted is returned when ingest stops early because the caller's
 // context was cancelled (Ctrl-C). It wraps context.Canceled so callers can
 // detect it with errors.Is(err, context.Canceled). In-flight repos are
@@ -213,12 +220,12 @@ func ingestRepo(
 	// (fail-fast) via the group's context.
 	g, gctx := errgroup.WithContext(ctx)
 	g.Go(func() error {
-		n, err := streamRepoCommits(gctx, db, gh, provider, repo)
+		n, err := streamRepoCommits(gctx, db, gh, provider, repo, reporter)
 		nCommits = n
 		return err
 	})
 	g.Go(func() error {
-		n, err := streamRepoPRs(gctx, db, gh, provider, repo, squashRecovery)
+		n, err := streamRepoPRs(gctx, db, gh, provider, repo, squashRecovery, reporter)
 		nPRs = n
 		return err
 	})
@@ -237,7 +244,7 @@ func ingestRepo(
 	return nCommits, nPRs, nil
 }
 
-func streamRepoCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo) (int, error) {
+func streamRepoCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, reporter progress.Reporter) (int, error) {
 	since, err := readRepoWatermark(ctx, db, provider, repo.FullName(), "last_commit_indexed_at")
 	if err != nil {
 		return 0, err
@@ -251,11 +258,14 @@ func streamRepoCommits(ctx context.Context, db *sql.DB, gh githost.GitHost, prov
 			return n, err
 		}
 		n++
+		if n%progressEvery == 0 {
+			reporter.RepoProgress(repo.FullName(), n, -1)
+		}
 	}
 	return n, nil
 }
 
-func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, squashRecovery bool) (int, error) {
+func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider string, repo githost.Repo, squashRecovery bool, reporter progress.Reporter) (int, error) {
 	since, err := readRepoWatermark(ctx, db, provider, repo.FullName(), "last_pr_indexed_at")
 	if err != nil {
 		return 0, err
@@ -277,6 +287,9 @@ func streamRepoPRs(ctx context.Context, db *sql.DB, gh githost.GitHost, provider
 			}
 		}
 		n++
+		if n%progressEveryPR == 0 {
+			reporter.RepoProgress(repo.FullName(), -1, n)
+		}
 	}
 	return n, nil
 }

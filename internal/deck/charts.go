@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"html/template"
+	"strings"
 
 	"github.com/StephanSchmidt/loupe/internal/analyze"
 )
@@ -18,13 +19,80 @@ import (
 // a graphic overlay (positioned via convertToPixel at the category
 // boundary, not snapped to a bar center as markLine would be).
 type ChartPayload struct {
-	ThroughputJSON       template.JS
-	AdoptionJSON         template.JS
-	CycleJSON            template.JS // empty when no ticket cycle data
-	HasCycle             bool
-	ThroughputCutoverIdx int // -1 if no cutover detected
-	AdoptionCutoverIdx   int
-	CycleCutoverIdx      int
+	ThroughputJSON         template.JS
+	AdoptionJSON           template.JS
+	CycleJSON              template.JS // empty when no ticket cycle data
+	HasCycle               bool
+	RepoAdoptionJSON       template.JS // empty when no repo data
+	HasRepoAdoption        bool
+	WIPJSON                template.JS // empty when no ticket data
+	HasWIP                 bool
+	DefectsJSON            template.JS // empty when no commit data
+	HasDefects             bool
+	ThroughputCutoverIdx   int // -1 if no cutover detected
+	AdoptionCutoverIdx     int
+	CycleCutoverIdx        int
+	RepoAdoptionCutoverIdx int
+	WIPCutoverIdx          int
+	DefectsCutoverIdx      int
+	// Focus holds per-project scoped copies of the charts above, rendered as
+	// extra slides after each org-wide chart. Empty unless `focus` is set.
+	Focus []FocusChartPayload
+}
+
+// FocusChartPayload is one named project lens: scoped ECharts options for
+// each chart, identified by a URL-safe Slug used in the slide's data-chart id.
+type FocusChartPayload struct {
+	Name string
+	Slug string
+
+	ThroughputJSON   template.JS
+	AdoptionJSON     template.JS
+	CycleJSON        template.JS
+	HasCycle         bool
+	WIPJSON          template.JS
+	HasWIP           bool
+	DefectsJSON      template.JS
+	HasDefects       bool
+	RepoAdoptionJSON template.JS
+	HasRepoAdoption  bool
+
+	ThroughputCutoverIdx   int
+	AdoptionCutoverIdx     int
+	CycleCutoverIdx        int
+	WIPCutoverIdx          int
+	DefectsCutoverIdx      int
+	RepoAdoptionCutoverIdx int
+}
+
+// FocusData is one lens's scoped weekly series, computed by the caller and
+// turned into a FocusChartPayload here.
+type FocusData struct {
+	Name         string
+	Weeks        []analyze.WeekStats
+	Cycles       []analyze.WeekCycle
+	WIP          []analyze.WIPWeek
+	Defects      []analyze.DefectWeek
+	RepoAdoption []analyze.RepoAdoptionWeek
+}
+
+// focusSlug turns a focus name into a URL-/id-safe token.
+func focusSlug(name string) string {
+	var b strings.Builder
+	prevDash := false
+	for _, r := range strings.ToLower(name) {
+		switch {
+		case (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'):
+			b.WriteRune(r)
+			prevDash = false
+		default:
+			if !prevDash {
+				b.WriteByte('-')
+				prevDash = true
+			}
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // Dark-theme palette — kept in sync with template.html.tmpl's CSS vars.
@@ -38,7 +106,14 @@ const (
 	chartTooltipBG  = "#11172a"
 	chartAccent     = "#f59e0b" // amber — AI-tagged (high confidence) + cutover marker
 	chartAccentSoft = "#fcd34d" // softer amber — inferred AI (medium confidence)
-	chartAccent2    = "#3b82f6" // blue — human commits
+	chartAccent2    = "#3b82f6" // blue — human commits / AI-enabled repos
+	chartRepoActive = "#93c5fd" // light blue — repos active in the last 90 days
+	chartRepoInactive = "#6b7280" // gray — repos inactive >90 days
+	chartLeadWait   = "#22c55e" // green — lead-time wait (Create → In Progress)
+	chartWipActive  = "#c2410c" // burnt orange — issues in progress
+	chartWipPending = "#fdba74" // light orange — issues not started
+	chartDefectRevert = "#ef4444" // red — revert rate
+	chartDefectBug    = "#f59e0b" // amber — bug rate
 	chartDeckBG     = "#0b0f17" // slide background, used as label foreground on accent pill
 	chartFontStack  = "-apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica Neue, Arial, sans-serif"
 )
@@ -46,7 +121,7 @@ const (
 // BuildChartPayload prepares the ECharts option payloads for the deck. The
 // rendered template hands these to echarts.init().setOption() in the
 // browser. The Go side does no PNG rasterisation.
-func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle) (ChartPayload, error) {
+func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, focus []FocusData) (ChartPayload, error) {
 	if len(weeks) == 0 {
 		return ChartPayload{}, fmt.Errorf("BuildChartPayload: no weekly data")
 	}
@@ -64,11 +139,14 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	// option map (only numbers, ECharts keywords, and time-formatted
 	// strings), so the template.JS conversion is safe here.
 	out := ChartPayload{
-		ThroughputJSON:       template.JS(thru),  // #nosec G203 -- JSON-encoded payload, see comment above
-		AdoptionJSON:         template.JS(adopt), // #nosec G203 -- JSON-encoded payload, see comment above
-		ThroughputCutoverIdx: cutoverIdx,
-		AdoptionCutoverIdx:   cutoverIdx,
-		CycleCutoverIdx:      -1,
+		ThroughputJSON:         template.JS(thru),  // #nosec G203 -- JSON-encoded payload, see comment above
+		AdoptionJSON:           template.JS(adopt), // #nosec G203 -- JSON-encoded payload, see comment above
+		ThroughputCutoverIdx:   cutoverIdx,
+		AdoptionCutoverIdx:     cutoverIdx,
+		CycleCutoverIdx:        -1,
+		RepoAdoptionCutoverIdx: -1,
+		WIPCutoverIdx:          -1,
+		DefectsCutoverIdx:      -1,
 	}
 	if len(cycles) > 0 {
 		cycle, idx, err := marshalCycleOption(cycles, cutover)
@@ -79,7 +157,258 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 		out.CycleCutoverIdx = idx
 		out.HasCycle = true
 	}
+	if len(repoAdoption) > 0 {
+		ra, idx, err := marshalRepoAdoptionOption(repoAdoption, cutover)
+		if err != nil {
+			return ChartPayload{}, fmt.Errorf("marshal repo adoption option: %w", err)
+		}
+		out.RepoAdoptionJSON = template.JS(ra) // #nosec G203 -- JSON-encoded payload
+		out.RepoAdoptionCutoverIdx = idx
+		out.HasRepoAdoption = true
+	}
+	if len(wip) > 0 {
+		w, idx, err := marshalWIPOption(wip, cutover)
+		if err != nil {
+			return ChartPayload{}, fmt.Errorf("marshal WIP option: %w", err)
+		}
+		out.WIPJSON = template.JS(w) // #nosec G203 -- JSON-encoded payload
+		out.WIPCutoverIdx = idx
+		out.HasWIP = true
+	}
+	if len(defects) > 0 {
+		d, idx, err := marshalDefectsOption(defects, cutover)
+		if err != nil {
+			return ChartPayload{}, fmt.Errorf("marshal defects option: %w", err)
+		}
+		out.DefectsJSON = template.JS(d) // #nosec G203 -- JSON-encoded payload
+		out.DefectsCutoverIdx = idx
+		out.HasDefects = true
+	}
+	for _, f := range focus {
+		fp, err := buildFocusPayload(f, cutover)
+		if err != nil {
+			return ChartPayload{}, err
+		}
+		out.Focus = append(out.Focus, fp)
+	}
 	return out, nil
+}
+
+// buildFocusPayload marshals one lens's scoped charts, reusing the org-wide
+// chart builders against the lens's filtered series and the org cutover.
+func buildFocusPayload(f FocusData, cutover analyze.Cutover) (FocusChartPayload, error) {
+	fp := FocusChartPayload{
+		Name: f.Name, Slug: focusSlug(f.Name),
+		ThroughputCutoverIdx: -1, AdoptionCutoverIdx: -1, CycleCutoverIdx: -1,
+		WIPCutoverIdx: -1, DefectsCutoverIdx: -1, RepoAdoptionCutoverIdx: -1,
+	}
+	if len(f.Weeks) > 0 {
+		_, idx := axisLabelsAndCutover(f.Weeks, cutover)
+		thru, err := marshalOption(buildThroughputOption(f.Weeks, cutover))
+		if err != nil {
+			return fp, fmt.Errorf("focus %q throughput: %w", f.Name, err)
+		}
+		adopt, err := marshalOption(buildAdoptionOption(f.Weeks, cutover))
+		if err != nil {
+			return fp, fmt.Errorf("focus %q adoption: %w", f.Name, err)
+		}
+		fp.ThroughputJSON = template.JS(thru)  // #nosec G203
+		fp.AdoptionJSON = template.JS(adopt)    // #nosec G203
+		fp.ThroughputCutoverIdx = idx
+		fp.AdoptionCutoverIdx = idx
+	}
+	// "AI-enabled repos" is a portfolio metric — a count of repos per week.
+	// Scoped to a focus's handful of repos it's meaningless, so it's
+	// deliberately omitted from focus slides (org-wide only).
+	if len(f.WIP) > 0 {
+		w, idx, err := marshalWIPOption(f.WIP, cutover)
+		if err != nil {
+			return fp, fmt.Errorf("focus %q wip: %w", f.Name, err)
+		}
+		fp.WIPJSON = template.JS(w) // #nosec G203
+		fp.WIPCutoverIdx = idx
+		fp.HasWIP = true
+	}
+	if len(f.Defects) > 0 {
+		d, idx, err := marshalDefectsOption(f.Defects, cutover)
+		if err != nil {
+			return fp, fmt.Errorf("focus %q defects: %w", f.Name, err)
+		}
+		fp.DefectsJSON = template.JS(d) // #nosec G203
+		fp.DefectsCutoverIdx = idx
+		fp.HasDefects = true
+	}
+	if len(f.Cycles) > 0 {
+		c, idx, err := marshalCycleOption(f.Cycles, cutover)
+		if err != nil {
+			return fp, fmt.Errorf("focus %q cycle: %w", f.Name, err)
+		}
+		fp.CycleJSON = template.JS(c) // #nosec G203
+		fp.CycleCutoverIdx = idx
+		fp.HasCycle = true
+	}
+	return fp, nil
+}
+
+// buildDefectsOption produces the ECharts option for the quality
+// counterweight: weekly revert rate (%) and, when ticket data exists, bug
+// rate (%) — both as lines on a shared percentage axis.
+func buildDefectsOption(rows []analyze.DefectWeek, cutover analyze.Cutover) (map[string]any, int) {
+	labels := make([]string, len(rows))
+	revert := make([]float64, len(rows))
+	bug := make([]float64, len(rows))
+	hasBugs := false
+	cutoverIdx := -1
+	prevYear := 0
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		revert[i] = roundTo1(r.RevertRate())
+		bug[i] = roundTo1(r.BugRate())
+		if r.Tickets > 0 {
+			hasBugs = true
+		}
+	}
+
+	// Grouped (not stacked) bars: the two rates have different denominators
+	// (commits vs tickets), so a stacked total would be meaningless.
+	bar := func(name string, data []float64) map[string]any {
+		return map[string]any{
+			"name": name, "type": "bar", "data": data,
+			"itemStyle": map[string]any{"borderRadius": []int{3, 3, 0, 0}},
+		}
+	}
+
+	opt := darkChartBase("Quality counterweight — revert & bug rate", cutover)
+	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
+	opt["xAxis"] = darkCategoryAxis(labels)
+	opt["yAxis"] = darkValueAxis(map[string]any{
+		"min":       0,
+		"axisLabel": map[string]any{"formatter": "{value}%", "color": chartMuted},
+	})
+	if hasBugs {
+		opt["color"] = []string{chartDefectRevert, chartDefectBug}
+		opt["legend"] = darkLegend([]string{"Revert rate", "Bug rate"})
+		opt["series"] = []map[string]any{bar("Revert rate", revert), bar("Bug rate", bug)}
+	} else {
+		opt["color"] = []string{chartDefectRevert}
+		opt["legend"] = darkLegend([]string{"Revert rate"})
+		opt["series"] = []map[string]any{bar("Revert rate", revert)}
+	}
+	return opt, cutoverIdx
+}
+
+func marshalDefectsOption(rows []analyze.DefectWeek, cutover analyze.Cutover) ([]byte, int, error) {
+	opt, idx := buildDefectsOption(rows, cutover)
+	b, err := marshalOption(opt)
+	return b, idx, err
+}
+
+// buildWIPOption produces the ECharts option for the per-week work-in-progress
+// snapshot (open issues, In Progress + Not Started).
+func buildWIPOption(rows []analyze.WIPWeek, cutover analyze.Cutover) (map[string]any, int) {
+	labels := make([]string, len(rows))
+	inProg := make([]int, len(rows))
+	notStarted := make([]int, len(rows))
+	cutoverIdx := -1
+	prevYear := 0
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		inProg[i] = r.InProgress
+		notStarted[i] = r.NotStarted
+	}
+
+	bar := func(name string, data []int, radius []int) map[string]any {
+		return map[string]any{
+			"name": name, "type": "bar", "stack": "wip", "data": data,
+			"itemStyle": map[string]any{"borderRadius": radius},
+		}
+	}
+
+	opt := darkChartBase("Work in progress — open issues", cutover)
+	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
+	opt["xAxis"] = darkCategoryAxis(labels)
+	opt["yAxis"] = darkValueAxis(map[string]any{"minInterval": 1})
+	opt["color"] = []string{chartWipActive, chartWipPending}
+	opt["legend"] = darkLegend([]string{"In Progress", "Not Started"})
+	opt["series"] = []map[string]any{
+		bar("In Progress", inProg, []int{0, 0, 0, 0}),
+		bar("Not Started", notStarted, []int{3, 3, 0, 0}),
+	}
+	return opt, cutoverIdx
+}
+
+func marshalWIPOption(rows []analyze.WIPWeek, cutover analyze.Cutover) ([]byte, int, error) {
+	opt, idx := buildWIPOption(rows, cutover)
+	b, err := marshalOption(opt)
+	return b, idx, err
+}
+
+// buildRepoAdoptionOption produces the ECharts option for the per-week
+// stacked bar of repositories by AI adoption + activity. Returns the cutover
+// label index (-1 if outside the window).
+func buildRepoAdoptionOption(rows []analyze.RepoAdoptionWeek, cutover analyze.Cutover) (map[string]any, int) {
+	labels := make([]string, len(rows))
+	ai := make([]int, len(rows))
+	active := make([]int, len(rows))
+	inactive := make([]int, len(rows))
+	cutoverIdx := -1
+	prevYear := 0
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		ai[i] = r.AIEnabled
+		active[i] = r.Active
+		inactive[i] = r.Inactive
+	}
+
+	bar := func(name string, data []int, radius []int) map[string]any {
+		return map[string]any{
+			"name": name, "type": "bar", "stack": "repos", "data": data,
+			"itemStyle": map[string]any{"borderRadius": radius},
+		}
+	}
+
+	opt := darkChartBase("AI-enabled repos", cutover)
+	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
+	opt["xAxis"] = darkCategoryAxis(labels)
+	opt["yAxis"] = darkValueAxis(map[string]any{"minInterval": 1})
+	opt["color"] = []string{chartAccent2, chartRepoActive, chartRepoInactive}
+	opt["legend"] = darkLegend([]string{"AI-enabled", "Active (≤90d)", "Inactive (>90d)"})
+	opt["series"] = []map[string]any{
+		bar("AI-enabled", ai, []int{0, 0, 0, 0}),
+		bar("Active (≤90d)", active, []int{0, 0, 0, 0}),
+		bar("Inactive (>90d)", inactive, []int{3, 3, 0, 0}),
+	}
+	return opt, cutoverIdx
+}
+
+func marshalRepoAdoptionOption(rows []analyze.RepoAdoptionWeek, cutover analyze.Cutover) ([]byte, int, error) {
+	opt, idx := buildRepoAdoptionOption(rows, cutover)
+	b, err := marshalOption(opt)
+	return b, idx, err
 }
 
 func marshalCycleOption(cycles []analyze.WeekCycle, cutover analyze.Cutover) ([]byte, int, error) {
@@ -126,7 +455,7 @@ func buildThroughputOption(weeks []analyze.WeekStats, cutover analyze.Cutover) m
 	opt := darkChartBase("Weekly commits", cutover)
 	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
 	opt["xAxis"] = darkCategoryAxis(labels)
-	opt["yAxis"] = darkValueAxis(nil)
+	opt["yAxis"] = darkValueAxis(map[string]any{"minInterval": 1})
 
 	if hasMedium {
 		aiHighSeries := map[string]any{
@@ -157,33 +486,58 @@ func buildThroughputOption(weeks []analyze.WeekStats, cutover analyze.Cutover) m
 // one AI-tagged commit).
 func buildAdoptionOption(weeks []analyze.WeekStats, cutover analyze.Cutover) map[string]any {
 	labels, _ := axisLabelsAndCutover(weeks, cutover)
-	pct := make([]float64, len(weeks))
+	human := make([]float64, len(weeks))
+	aiHigh := make([]float64, len(weeks))
+	aiMed := make([]float64, len(weeks))
+	hasMedium := false
 	for i, w := range weeks {
-		pct[i] = w.AdoptionRatio() * 100
+		if w.TotalCommits > 0 {
+			t := float64(w.TotalCommits)
+			human[i] = float64(w.TotalCommits-w.AICommits) / t * 100
+			aiHigh[i] = float64(w.AICommitsHigh) / t * 100
+			aiMed[i] = float64(w.AICommitsMedium) / t * 100
+		}
+		if w.AICommitsMedium > 0 {
+			hasMedium = true
+		}
 	}
 
-	series := map[string]any{
-		"name":       "AI-using devs %",
-		"type":       "line",
-		"smooth":     true,
-		"data":       pct,
-		"symbol":     "circle",
-		"symbolSize": 8,
-		"lineStyle":  map[string]any{"width": 3},
-		"areaStyle":  map[string]any{"opacity": 0.18},
+	humanSeries := map[string]any{
+		"name": "Human", "type": "bar", "stack": "total", "data": human,
+		"itemStyle": map[string]any{"borderRadius": []int{0, 0, 0, 0}},
 	}
 
-	opt := darkChartBase("AI adoption — % of weekly active devs", cutover)
-	opt["color"] = []string{chartAccent}
-	opt["legend"] = darkLegend([]string{"AI-using devs %"})
-	opt["tooltip"] = darkTooltip(nil)
+	opt := darkChartBase("AI adoption — % of weekly commits", cutover)
+	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
 	opt["xAxis"] = darkCategoryAxis(labels)
+	// Percentages sum to 100; pin the axis so the bars read as composition.
 	opt["yAxis"] = darkValueAxis(map[string]any{
 		"min":       0,
 		"max":       100,
 		"axisLabel": map[string]any{"formatter": "{value}%", "color": chartMuted},
 	})
-	opt["series"] = []map[string]any{series}
+
+	if hasMedium {
+		aiHighSeries := map[string]any{
+			"name": "AI (evidence)", "type": "bar", "stack": "total", "data": aiHigh,
+			"itemStyle": map[string]any{"borderRadius": []int{0, 0, 0, 0}},
+		}
+		aiMedSeries := map[string]any{
+			"name": "AI (inferred)", "type": "bar", "stack": "total", "data": aiMed,
+			"itemStyle": map[string]any{"borderRadius": []int{3, 3, 0, 0}},
+		}
+		opt["color"] = []string{chartAccent2, chartAccent, chartAccentSoft}
+		opt["legend"] = darkLegend([]string{"Human", "AI (evidence)", "AI (inferred)"})
+		opt["series"] = []map[string]any{humanSeries, aiHighSeries, aiMedSeries}
+	} else {
+		aiSeries := map[string]any{
+			"name": "AI-tagged", "type": "bar", "stack": "total", "data": aiHigh,
+			"itemStyle": map[string]any{"borderRadius": []int{3, 3, 0, 0}},
+		}
+		opt["color"] = []string{chartAccent2, chartAccent}
+		opt["legend"] = darkLegend([]string{"Human", "AI-tagged"})
+		opt["series"] = []map[string]any{humanSeries, aiSeries}
+	}
 	return opt
 }
 
@@ -212,24 +566,24 @@ func buildCycleOption(cycles []analyze.WeekCycle, cutover analyze.Cutover) (map[
 		}
 	}
 
-	devSeries := map[string]any{
-		"name": "Dev → Release", "type": "bar", "stack": "cycle", "data": dev,
+	cycleSeries := map[string]any{
+		"name": "Cycle (dev start → last commit)", "type": "bar", "stack": "cycle", "data": dev,
 		"itemStyle": map[string]any{"borderRadius": []int{0, 0, 0, 0}},
 	}
-	ideaSeries := map[string]any{
-		"name": "Idea → Dev", "type": "bar", "stack": "cycle", "data": idea,
+	waitSeries := map[string]any{
+		"name": "Wait (Create → dev start)", "type": "bar", "stack": "cycle", "data": idea,
 		"itemStyle": map[string]any{"borderRadius": []int{3, 3, 0, 0}},
 	}
 
-	opt := darkChartBase("Cycle time per week (median days)", cutover)
-	opt["color"] = []string{chartAccent2, chartAccent}
-	opt["legend"] = darkLegend([]string{"Dev → Release", "Idea → Dev"})
+	opt := darkChartBase("Lead time — median days per ISO week", cutover)
+	opt["color"] = []string{chartAccent2, chartLeadWait}
+	opt["legend"] = darkLegend([]string{"Cycle (dev start → last commit)", "Wait (Create → dev start)"})
 	opt["tooltip"] = darkTooltip(map[string]any{"type": "shadow"})
 	opt["xAxis"] = darkCategoryAxis(labels)
 	opt["yAxis"] = darkValueAxis(map[string]any{
 		"axisLabel": map[string]any{"formatter": "{value} d", "color": chartMuted},
 	})
-	opt["series"] = []map[string]any{devSeries, ideaSeries}
+	opt["series"] = []map[string]any{cycleSeries, waitSeries}
 	return opt, cutoverIdx
 }
 

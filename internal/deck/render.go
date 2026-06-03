@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/StephanSchmidt/loupe/internal/analyze"
@@ -28,6 +29,7 @@ var deckTemplate string
 // pre-computed in RenderDeck so the template stays format-only.
 type DeckData struct {
 	OrgName             string
+	Title               string // deck headline; config Title or Org
 	Scope               string
 	ReportDate          time.Time
 	WindowStart         time.Time
@@ -49,6 +51,22 @@ type DeckData struct {
 	CyclesAvailable     bool
 	CycleTickets        int
 	CycleFallbackPct    float64
+
+	// Repo-adoption slide: stacked count of repos by AI adoption + activity.
+	RepoAdoptionAvailable bool
+	RepoAdoptionAdopted   int // repos AI-enabled as of the latest week
+	RepoAdoptionTotal     int // repos in existence as of the latest week
+
+	// Quality counterweight slide: revert + bug rate, before/after cutover.
+	DefectsAvailable  bool
+	DefectsHasBugs    bool
+	DefectsHasCutover bool
+	RevertRateOverall float64
+	BugRateOverall    float64
+	RevertRateBefore  float64
+	RevertRateAfter   float64
+	BugRateBefore     float64
+	BugRateAfter      float64
 	MedianIdeaToDevText string
 	MedianDevToRelText  string
 
@@ -100,6 +118,10 @@ func RenderDeck(
 	weeks []analyze.WeekStats,
 	cutover analyze.Cutover,
 	cycles []analyze.WeekCycle,
+	repoAdoption []analyze.RepoAdoptionWeek,
+	wip []analyze.WIPWeek,
+	defects []analyze.DefectWeek,
+	focus []FocusData,
 	tools analyze.ToolBreakdownStats,
 	reportDate time.Time,
 ) error {
@@ -112,21 +134,33 @@ func RenderDeck(
 	// detection upstream; it's only hidden from these charts.
 	weeks = analyze.WindowWeeks(weeks, cfg.Windows.DisplayMonths)
 	cycles = analyze.WindowCycles(cycles, cfg.Windows.DisplayMonths)
+	repoAdoption = analyze.WindowRepoAdoption(repoAdoption, cfg.Windows.DisplayMonths)
+	wip = analyze.WindowWIP(wip, cfg.Windows.DisplayMonths)
+	defects = analyze.WindowDefects(defects, cfg.Windows.DisplayMonths)
+	m := cfg.Windows.DisplayMonths
+	for i := range focus {
+		focus[i].Weeks = analyze.WindowWeeks(focus[i].Weeks, m)
+		focus[i].Cycles = analyze.WindowCycles(focus[i].Cycles, m)
+		focus[i].RepoAdoption = analyze.WindowRepoAdoption(focus[i].RepoAdoption, m)
+		focus[i].WIP = analyze.WindowWIP(focus[i].WIP, m)
+		focus[i].Defects = analyze.WindowDefects(focus[i].Defects, m)
+	}
 
 	if err := copyEmbeddedAssets(filepath.Join(deckDir, "assets")); err != nil {
 		return err
 	}
 
-	payload, err := BuildChartPayload(weeks, cutover, cycles)
+	payload, err := BuildChartPayload(weeks, cutover, cycles, repoAdoption, wip, defects, focus)
 	if err != nil {
 		return fmt.Errorf("build chart payload: %w", err)
 	}
 
-	if err := RenderStaticCharts(weeks, cutover, cycles, filepath.Join(deckDir, "charts")); err != nil {
+	if err := RenderStaticCharts(weeks, cutover, cycles, repoAdoption, wip, defects, filepath.Join(deckDir, "charts")); err != nil {
 		return fmt.Errorf("render static charts: %w", err)
 	}
 
-	data := buildDeckData(cfg, weeks, cutover, cycles, reportDate)
+	data := buildDeckData(cfg, weeks, cutover, cycles, repoAdoption, reportDate)
+	populateDefectSummary(&data, defects, cutover)
 	data.Tools = tools.Tools
 	data.ToolsAvailable = len(tools.Tools) > 0
 	data.ToolsCommitsTotal = tools.DistinctCommits
@@ -149,22 +183,52 @@ func RenderDeck(
 	return nil
 }
 
+// populateDefectSummary fills the quality-counterweight headline: overall
+// revert/bug rates and, when a cutover splits the window, before vs after.
+func populateDefectSummary(d *DeckData, defects []analyze.DefectWeek, cutover analyze.Cutover) {
+	if len(defects) == 0 {
+		return
+	}
+	d.DefectsAvailable = true
+	d.RevertRateOverall, d.BugRateOverall, d.DefectsHasBugs = analyze.DefectRates(defects)
+	if cutover.Detected {
+		before, after := analyze.SplitDefectsByCutover(defects, cutover)
+		if len(before) > 0 && len(after) > 0 {
+			d.DefectsHasCutover = true
+			d.RevertRateBefore, d.BugRateBefore, _ = analyze.DefectRates(before)
+			d.RevertRateAfter, d.BugRateAfter, _ = analyze.DefectRates(after)
+		}
+	}
+}
+
 func buildDeckData(
 	cfg *config.Config,
 	weeks []analyze.WeekStats,
 	cutover analyze.Cutover,
 	cycles []analyze.WeekCycle,
+	repoAdoption []analyze.RepoAdoptionWeek,
 	reportDate time.Time,
 ) DeckData {
+	title := cfg.Title
+	if strings.TrimSpace(title) == "" {
+		title = cfg.Org
+	}
 	d := DeckData{
-		OrgName:             cfg.Org,
-		Scope:               cfg.Org,
-		ReportDate:          reportDate,
-		Weeks:               weeks,
-		Cutover:             cutover,
-		CutoverThresholdPct: cutover.Threshold * 100,
-		Cycles:              cycles,
-		CyclesAvailable:     len(cycles) > 0,
+		OrgName:               cfg.Org,
+		Title:                 title,
+		Scope:                 cfg.Org,
+		ReportDate:            reportDate,
+		Weeks:                 weeks,
+		Cutover:               cutover,
+		CutoverThresholdPct:   cutover.Threshold * 100,
+		Cycles:                cycles,
+		CyclesAvailable:       len(cycles) > 0,
+		RepoAdoptionAvailable: len(repoAdoption) > 0,
+	}
+	if n := len(repoAdoption); n > 0 {
+		last := repoAdoption[n-1]
+		d.RepoAdoptionAdopted = last.AIEnabled
+		d.RepoAdoptionTotal = last.AIEnabled + last.Active + last.Inactive
 	}
 
 	if len(cycles) > 0 {

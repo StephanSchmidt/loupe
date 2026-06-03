@@ -42,7 +42,10 @@ var supportedGitHostProviders = []string{ProviderBitbucketCloud, ProviderGitHub,
 var supportedTrackerProviders = []string{ProviderJiraCloud, ProviderGitHub, ProviderGitLab, ProviderLinear, ProviderAzureDevOps}
 
 type Config struct {
-	Org        string           `yaml:"org"`
+	Org string `yaml:"org"`
+	// Title is the deck's headline (title slide + browser tab). Falls back to
+	// Org when unset.
+	Title      string           `yaml:"title"`
 	GitHost    GitHostConfig    `yaml:"git_host"`
 	Tracker    TrackerConfig    `yaml:"tracker"`
 	Teams      []TeamConfig     `yaml:"teams"`
@@ -50,6 +53,43 @@ type Config struct {
 	CycleTime  CycleTimeConfig  `yaml:"cycle_time"`
 	Windows    WindowsConfig    `yaml:"windows"`
 	Output     OutputConfig     `yaml:"output"`
+	// Focus lists named (tracker project + repo set) lenses. Each renders a
+	// scoped copy of every time-series chart after its org-wide slide. Empty
+	// = org-wide deck only (unchanged).
+	Focus []FocusConfig `yaml:"focus"`
+}
+
+// FocusConfig scopes a per-project lens. Repos are Bitbucket slugs
+// ("backend") or full names ("acme/backend"); TrackerProject is the Jira
+// project key ("ENG").
+type FocusConfig struct {
+	Name           string   `yaml:"name"`
+	Title          string   `yaml:"title"` // slide label; falls back to Name
+	TrackerProject string   `yaml:"tracker_project"`
+	Repos          []string `yaml:"repos"`
+}
+
+// DisplayTitle is the label shown on the focus slides — the configured Title,
+// or Name when Title is unset.
+func (f FocusConfig) DisplayTitle() string {
+	if strings.TrimSpace(f.Title) != "" {
+		return f.Title
+	}
+	return f.Name
+}
+
+// RepoFullNames qualifies bare repo slugs with the workspace/org so they
+// match the stored `commits.repo_name` ("org/slug").
+func (f FocusConfig) RepoFullNames(org string) []string {
+	out := make([]string, 0, len(f.Repos))
+	for _, r := range f.Repos {
+		if strings.Contains(r, "/") {
+			out = append(out, r)
+		} else {
+			out = append(out, org+"/"+r)
+		}
+	}
+	return out
 }
 
 // CycleTimeConfig drives the idea→dev→release cycle-time charts. The
@@ -58,6 +98,15 @@ type Config struct {
 // matching transition is found.
 type CycleTimeConfig struct {
 	DevStartedStatuses []string `yaml:"dev_started_statuses"`
+	// DoneStatuses mark a ticket resolved. Matched case-insensitively, in
+	// addition to the generic resolved_at/closed_at timestamps. Defaults to
+	// the standard Jira terminal statuses.
+	DoneStatuses []string `yaml:"done_statuses"`
+	// AbandonedStatuses are terminal "dropped" statuses (won't-do, archived,
+	// …) that count as neither open nor done — tickets reaching them are
+	// excluded from the work-in-progress and lead-time charts entirely.
+	// Empty by default; org-specific (and often confidential) names go here.
+	AbandonedStatuses []string `yaml:"abandoned_statuses"`
 }
 
 // GitHostConfig holds non-secret coordinates for the git host. The token is
@@ -185,6 +234,11 @@ func (c *Config) applyDefaults() {
 		c.CycleTime.DevStartedStatuses = []string{
 			"In Progress", "In Development", "In Review", "Code Review",
 		}
+	}
+	if len(c.CycleTime.DoneStatuses) == 0 {
+		// Standard Jira terminal statuses only — org-specific names belong in
+		// the user's (private) config, not the published defaults.
+		c.CycleTime.DoneStatuses = []string{"Done", "Closed", "Resolved"}
 	}
 	if c.Windows.BaselineWeeks == 0 {
 		c.Windows.BaselineWeeks = defaultBaselineWeeks

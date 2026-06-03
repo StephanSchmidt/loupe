@@ -31,3 +31,20 @@ func WindowWeeks(weeks []WeekStats, months int) []WeekStats {
 func WindowCycles(cycles []WeekCycle, months int) []WeekCycle {
 	return windowByMonths(cycles, months, func(c WeekCycle) time.Time { return c.WeekStart })
 }
+
+// WindowRepoAdoption restricts weekly repo-adoption stats to the last
+// `months` months.
+func WindowRepoAdoption(rows []RepoAdoptionWeek, months int) []RepoAdoptionWeek {
+	return windowByMonths(rows, months, func(r RepoAdoptionWeek) time.Time { return r.WeekStart })
+}
+
+// WindowWIP restricts weekly work-in-progress stats to the last `months`
+// months.
+func WindowWIP(rows []WIPWeek, months int) []WIPWeek {
+	return windowByMonths(rows, months, func(r WIPWeek) time.Time { return r.WeekStart })
+}
+
+// WindowDefects restricts weekly defect stats to the last `months` months.
+func WindowDefects(rows []DefectWeek, months int) []DefectWeek {
+	return windowByMonths(rows, months, func(r DefectWeek) time.Time { return r.WeekStart })
+}

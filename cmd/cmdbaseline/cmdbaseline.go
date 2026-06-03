@@ -313,19 +313,10 @@ func runIngest(ctx context.Context, opts *baselineOpts, s *store.Store, gh githo
 	_, _ = fmt.Fprintf(out, "  %d workspaces, %d repos, %d commits, %d PRs\n",
 		ghStats.Workspaces, ghStats.Repos, ghStats.Commits, ghStats.PullRequests)
 
-	stored, err := s.CommitCount(ctx, gh.Name())
-	if err != nil {
-		return err
-	}
-	skipRender, err := ingestOutcome(ghStats.Commits, stored, opts.repoFilter)
-	if err != nil {
-		return err
-	}
-	if skipRender {
-		_, _ = fmt.Fprintf(out, "Already up to date (%d commits indexed). Run `loupe present` to view the latest deck.\n", stored)
-		return errAlreadyUpToDate
-	}
-
+	// Always index the tracker too — even when git-host had nothing new the
+	// tracker may have new tickets, or may never have been ingested at all.
+	// (Skipping it here is what previously left re-runs without any Jira
+	// data once the git host was current.)
 	_, _ = fmt.Fprintf(out, "Indexing tracker (%s)...\n", trk.Name())
 	tStats, err := ingest.IngestTracker(ctx, s, trk, out, ingest.TrackerFilter{Project: opts.projectFilter})
 	if err != nil {
@@ -335,6 +326,20 @@ func runIngest(ctx context.Context, opts *baselineOpts, s *store.Store, gh githo
 		return fmt.Errorf("ingest tracker: %w", err)
 	}
 	_, _ = fmt.Fprintf(out, "  %d projects, %d tickets\n", tStats.Projects, tStats.Issues)
+
+	stored, err := s.CommitCount(ctx, gh.Name())
+	if err != nil {
+		return err
+	}
+	// Nothing new from either side and we already have data → up to date.
+	skipRender, err := ingestOutcome(ghStats.Commits+tStats.Issues, stored, opts.repoFilter)
+	if err != nil {
+		return err
+	}
+	if skipRender {
+		_, _ = fmt.Fprintf(out, "Already up to date (%d commits indexed). Run `loupe present` to view the latest deck.\n", stored)
+		return errAlreadyUpToDate
+	}
 	return nil
 }
 
@@ -389,6 +394,8 @@ func logCutover(out io.Writer, c analyze.Cutover) {
 func renderAndAnnounce(ctx context.Context, opts *baselineOpts, weeks []analyze.WeekStats, cutover analyze.Cutover, s *store.Store) error {
 	cycles, err := analyze.WeeklyCycles(ctx, s, analyze.CycleConfig{
 		DevStartedStatuses: opts.cfg.CycleTime.DevStartedStatuses,
+		DoneStatuses:       opts.cfg.CycleTime.DoneStatuses,
+		AbandonedStatuses:  opts.cfg.CycleTime.AbandonedStatuses,
 	})
 	if err != nil {
 		return fmt.Errorf("weekly cycles: %w", err)
@@ -403,7 +410,27 @@ func renderAndAnnounce(ctx context.Context, opts *baselineOpts, weeks []analyze.
 	if err != nil {
 		return fmt.Errorf("tool breakdown: %w", err)
 	}
-	if err := deck.RenderDeck(deckDir, opts.cfg, weeks, cutover, cycles, tools, time.Now().UTC()); err != nil {
+	repoAdoption, err := analyze.WeeklyRepoAdoption(ctx, s)
+	if err != nil {
+		return fmt.Errorf("repo adoption: %w", err)
+	}
+	wip, err := analyze.WeeklyWIP(ctx, s, analyze.CycleConfig{
+		DevStartedStatuses: opts.cfg.CycleTime.DevStartedStatuses,
+		DoneStatuses:       opts.cfg.CycleTime.DoneStatuses,
+		AbandonedStatuses:  opts.cfg.CycleTime.AbandonedStatuses,
+	})
+	if err != nil {
+		return fmt.Errorf("work in progress: %w", err)
+	}
+	defects, err := analyze.WeeklyDefects(ctx, s)
+	if err != nil {
+		return fmt.Errorf("defects: %w", err)
+	}
+	focus, err := deck.ComputeFocus(ctx, s, opts.cfg)
+	if err != nil {
+		return fmt.Errorf("focus: %w", err)
+	}
+	if err := deck.RenderDeck(deckDir, opts.cfg, weeks, cutover, cycles, repoAdoption, wip, defects, focus, tools, time.Now().UTC()); err != nil {
 		return fmt.Errorf("render deck: %w", err)
 	}
 	_, _ = fmt.Fprintf(opts.out, "\nDeck ready: %s/index.html\n", deckDir)

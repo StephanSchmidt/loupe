@@ -68,7 +68,11 @@ func loadCycleConfig(path string) analyze.CycleConfig {
 	if err != nil {
 		return analyze.CycleConfig{}
 	}
-	return analyze.CycleConfig{DevStartedStatuses: cfg.CycleTime.DevStartedStatuses}
+	return analyze.CycleConfig{
+		DevStartedStatuses: cfg.CycleTime.DevStartedStatuses,
+		DoneStatuses:       cfg.CycleTime.DoneStatuses,
+		AbandonedStatuses:  cfg.CycleTime.AbandonedStatuses,
+	}
 }
 
 // loadCutoverConfig returns the cutover threshold + override the same way

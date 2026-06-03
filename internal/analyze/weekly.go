@@ -62,15 +62,22 @@ func IsoWeekStart(t time.Time) time.Time {
 // every count. AI bots (Copilot Coding Agent, Devin, …) stay in — their
 // commits represent real AI throughput.
 func WeeklyStats(ctx context.Context, s *store.Store) ([]WeekStats, error) {
+	return WeeklyStatsScoped(ctx, s, Scope{})
+}
+
+// WeeklyStatsScoped is WeeklyStats restricted to scope.Repos (commit charts).
+func WeeklyStatsScoped(ctx context.Context, s *store.Store, scope Scope) ([]WeekStats, error) {
+	filt, args := scope.commitFilter("c.repo_name")
 	rows, err := s.DB().QueryContext(ctx, `
         SELECT c.committed_at, c.author_email, c.author_name,
                MAX(CASE WHEN sig.confidence = 'high' THEN 1 ELSE 0 END) AS has_high,
                MAX(CASE WHEN sig.commit_sha IS NOT NULL THEN 1 ELSE 0 END) AS has_any
         FROM commits c
         LEFT JOIN ai_signals sig ON sig.commit_sha = c.sha
+        WHERE 1=1`+filt+`
         GROUP BY c.sha, c.committed_at, c.author_email, c.author_name
         ORDER BY c.committed_at
-    `)
+    `, args...)
 	if err != nil {
 		return nil, fmt.Errorf("query weekly: %w", err)
 	}

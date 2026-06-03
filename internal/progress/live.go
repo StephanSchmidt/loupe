@@ -33,6 +33,7 @@ const (
 	evListing evKind = iota
 	evFound
 	evStart
+	evProgress
 	evBackoff
 	evDone
 	evStop
@@ -50,6 +51,8 @@ type event struct {
 
 type repoState struct {
 	name           string
+	commits        int
+	prs            int
 	backoffUntil   time.Time
 	backoffAttempt int
 }
@@ -96,6 +99,10 @@ func (l *live) WorkspaceFound(ws string, visible, total int) {
 
 func (l *live) RepoStart(name string) { l.send(event{kind: evStart, name: name}) }
 
+func (l *live) RepoProgress(name string, commits, prs int) {
+	l.send(event{kind: evProgress, name: name, commits: commits, prs: prs})
+}
+
 func (l *live) RepoBackoff(name string, attempt int, d time.Duration) {
 	l.send(event{kind: evBackoff, name: name, attempt: attempt, delay: d})
 }
@@ -123,7 +130,14 @@ func (l *live) run() {
 	)
 
 	render := func() {
-		live := l.liveBlock(active, frame, doneRepos, total, totalCommits, totPRs)
+		// Include in-flight repos' running counts so the totals tick up
+		// while a big repo streams, instead of only jumping on completion.
+		liveCommits, livePRs := totalCommits, totPRs
+		for _, rs := range active {
+			liveCommits += rs.commits
+			livePRs += rs.prs
+		}
+		live := l.liveBlock(active, frame, doneRepos, total, liveCommits, livePRs)
 		// Move up over the previous live block and clear to end of screen,
 		// then print the freshly-completed permanent lines (they become
 		// scrollback) followed by the new live block.
@@ -170,6 +184,18 @@ func (l *live) run() {
 			case evStart:
 				if _, ok := active[e.name]; !ok {
 					active[e.name] = &repoState{name: e.name}
+				}
+			case evProgress:
+				rs := active[e.name]
+				if rs == nil {
+					rs = &repoState{name: e.name}
+					active[e.name] = rs
+				}
+				if e.commits >= 0 {
+					rs.commits = e.commits
+				}
+				if e.prs >= 0 {
+					rs.prs = e.prs
 				}
 			case evBackoff:
 				rs := active[e.name]
@@ -221,7 +247,11 @@ func (l *live) liveBlock(active map[string]*repoState, frame, done, total, commi
 			lines = append(lines, styleBackoff.Render(
 				fmt.Sprintf("    ⏳ %s — rate limited, retry in %s (attempt %d)", n, wait, rs.backoffAttempt)))
 		} else {
-			lines = append(lines, "    "+styleSpin.Render(spin)+" "+n)
+			line := "    " + styleSpin.Render(spin) + " " + n
+			if rs.commits > 0 || rs.prs > 0 {
+				line += styleDim.Render(fmt.Sprintf(" · %d commits, %d PRs", rs.commits, rs.prs))
+			}
+			lines = append(lines, line)
 		}
 	}
 	if extra > 0 {

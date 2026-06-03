@@ -48,9 +48,11 @@ type WeekCycle struct {
 	MedianIdeaToDev    time.Duration
 	P10IdeaToDev       time.Duration
 	P90IdeaToDev       time.Duration
+	MeanIdeaToDev      time.Duration
 	MedianDevToRelease time.Duration
 	P10DevToRelease    time.Duration
 	P90DevToRelease    time.Duration
+	MeanDevToRelease   time.Duration
 }
 
 // CycleConfig is the slice of tracker statuses (case-insensitive) that
@@ -58,6 +60,8 @@ type WeekCycle struct {
 // of an import on the config package.
 type CycleConfig struct {
 	DevStartedStatuses []string
+	DoneStatuses       []string
+	AbandonedStatuses  []string
 }
 
 // ComputeCycles produces one TicketCycle per ticket that has enough
@@ -66,13 +70,26 @@ type CycleConfig struct {
 // without any linked commits are dropped — there's no "release" moment
 // to bound the cycle.
 func ComputeCycles(ctx context.Context, s *store.Store, cfg CycleConfig) ([]TicketCycle, error) {
+	return ComputeCyclesScoped(ctx, s, cfg, Scope{})
+}
+
+// ComputeCyclesScoped is ComputeCycles restricted to scope.TrackerProject —
+// only that project's tickets are loaded; the per-ticket transition and
+// commit lookups follow.
+func ComputeCyclesScoped(ctx context.Context, s *store.Store, cfg CycleConfig, scope Scope) ([]TicketCycle, error) {
 	wanted := normaliseStatuses(cfg.DevStartedStatuses)
 
-	tickets, err := loadTicketsForCycle(ctx, s.DB())
+	tickets, err := loadTicketsForCycle(ctx, s.DB(), scope)
 	if err != nil {
 		return nil, err
 	}
 	devStartByTicket, err := loadDevStartTransitions(ctx, s.DB(), wanted)
+	if err != nil {
+		return nil, err
+	}
+	// Tickets that reached an "abandoned" status (won't-do, archived, …) have
+	// no legitimate cycle — drop them. Reuses the same first-transition scan.
+	abandonedByTicket, err := loadDevStartTransitions(ctx, s.DB(), normaliseStatuses(cfg.AbandonedStatuses))
 	if err != nil {
 		return nil, err
 	}
@@ -83,6 +100,9 @@ func ComputeCycles(ctx context.Context, s *store.Store, cfg CycleConfig) ([]Tick
 
 	out := make([]TicketCycle, 0, len(tickets))
 	for _, t := range tickets {
+		if _, abandoned := abandonedByTicket[t.id]; abandoned {
+			continue
+		}
 		last, hasCommit := lastCommit[t.id]
 		if !hasCommit {
 			continue
@@ -123,7 +143,12 @@ func ComputeCycles(ctx context.Context, s *store.Store, cfg CycleConfig) ([]Tick
 // WeeklyCycles buckets cycles by ISO week of LastDevAt and returns one
 // row per week with median + p10/p90 for both segments.
 func WeeklyCycles(ctx context.Context, s *store.Store, cfg CycleConfig) ([]WeekCycle, error) {
-	cycles, err := ComputeCycles(ctx, s, cfg)
+	return WeeklyCyclesScoped(ctx, s, cfg, Scope{})
+}
+
+// WeeklyCyclesScoped is WeeklyCycles restricted to scope.TrackerProject.
+func WeeklyCyclesScoped(ctx context.Context, s *store.Store, cfg CycleConfig, scope Scope) ([]WeekCycle, error) {
+	cycles, err := ComputeCyclesScoped(ctx, s, cfg, scope)
 	if err != nil {
 		return nil, err
 	}
@@ -159,9 +184,11 @@ func WeeklyCycles(ctx context.Context, s *store.Store, cfg CycleConfig) ([]WeekC
 			MedianIdeaToDev:     hoursToDuration(percentile(b.ideaToDev, 50)),
 			P10IdeaToDev:        hoursToDuration(percentile(b.ideaToDev, 10)),
 			P90IdeaToDev:        hoursToDuration(percentile(b.ideaToDev, 90)),
+			MeanIdeaToDev:       hoursToDuration(mean(b.ideaToDev)),
 			MedianDevToRelease:  hoursToDuration(percentile(b.devToRelease, 50)),
 			P10DevToRelease:     hoursToDuration(percentile(b.devToRelease, 10)),
 			P90DevToRelease:     hoursToDuration(percentile(b.devToRelease, 90)),
+			MeanDevToRelease:    hoursToDuration(mean(b.devToRelease)),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].WeekStart.Before(out[j].WeekStart) })
@@ -185,8 +212,9 @@ type ticketForCycle struct {
 	createdAt time.Time
 }
 
-func loadTicketsForCycle(ctx context.Context, db *sql.DB) ([]ticketForCycle, error) {
-	rows, err := db.QueryContext(ctx, `SELECT id, created_at FROM tickets`)
+func loadTicketsForCycle(ctx context.Context, db *sql.DB, scope Scope) ([]ticketForCycle, error) {
+	filt, args := scope.ticketFilter("project_key")
+	rows, err := db.QueryContext(ctx, `SELECT id, created_at FROM tickets WHERE 1=1`+filt, args...)
 	if err != nil {
 		return nil, fmt.Errorf("load tickets: %w", err)
 	}
@@ -275,6 +303,17 @@ func percentile(values []float64, p float64) float64 {
 		return 0
 	}
 	return v
+}
+
+func mean(values []float64) float64 {
+	if len(values) == 0 {
+		return 0
+	}
+	var sum float64
+	for _, v := range values {
+		sum += v
+	}
+	return sum / float64(len(values))
 }
 
 func hoursToDuration(h float64) time.Duration {
