@@ -23,6 +23,7 @@ var (
 	styleDone    = lipgloss.NewStyle().Foreground(lipgloss.Color("2")) // green
 	styleSpin    = lipgloss.NewStyle().Foreground(lipgloss.Color("6")) // cyan
 	styleBackoff = lipgloss.NewStyle().Foreground(lipgloss.Color("3")) // yellow
+	styleFail    = lipgloss.NewStyle().Foreground(lipgloss.Color("1")) // red
 	styleDim     = lipgloss.NewStyle().Faint(true)
 	styleBar     = lipgloss.NewStyle().Foreground(lipgloss.Color("4")) // blue
 )
@@ -36,6 +37,7 @@ const (
 	evProgress
 	evBackoff
 	evDone
+	evFailed
 	evStop
 )
 
@@ -47,6 +49,7 @@ type event struct {
 	commits, prs int
 	attempt      int
 	delay        time.Duration
+	err          error // evFailed
 }
 
 type repoState struct {
@@ -109,6 +112,10 @@ func (l *live) RepoBackoff(name string, attempt int, d time.Duration) {
 
 func (l *live) RepoDone(name string, commits, prs int) {
 	l.send(event{kind: evDone, name: name, commits: commits, prs: prs})
+}
+
+func (l *live) RepoFailed(name string, err error) {
+	l.send(event{kind: evFailed, name: name, err: err})
 }
 
 func (l *live) Stop() {
@@ -183,6 +190,11 @@ func (l *live) apply(e event, st *runState) {
 		st.totPRs += e.prs
 		st.pending = append(st.pending, styleDone.Render(
 			fmt.Sprintf("  ✓ %s: %d commits, %d PRs", e.name, e.commits, e.prs)))
+	case evFailed:
+		delete(st.active, e.name)
+		st.doneRepos++
+		st.pending = append(st.pending, styleFail.Render(
+			fmt.Sprintf("  ✗ %s: FAILED — %v", e.name, e.err)))
 	}
 }
 

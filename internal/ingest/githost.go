@@ -8,6 +8,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -44,12 +45,25 @@ const (
 // next run resumes from there.
 var ErrInterrupted = fmt.Errorf("ingest interrupted: %w", context.Canceled)
 
+// ErrPartialFailure is returned (wrapped) when one or more repos or
+// workspaces failed to ingest but the run carried on. Completed repos keep
+// their watermarks; failed ones stay unset so the next baseline retries
+// exactly the missing work. Callers can errors.Is on this to downgrade the
+// failure to a warning when enough data still landed.
+var ErrPartialFailure = fmt.Errorf("some repositories failed to ingest")
+
 // GitHostStats is the summary returned by IngestGitHost.
 type GitHostStats struct {
 	Workspaces   int
 	Repos        int
 	Commits      int
 	PullRequests int
+	// ReposFailed counts repos whose ingest errored and was skipped — their
+	// watermarks are untouched, so the next run retries them.
+	ReposFailed int
+	// ReposSkippedArchived counts repos skipped because the host marks them
+	// archived (read-only) — their history can no longer change.
+	ReposSkippedArchived int
 }
 
 // GitHostFilter restricts which workspaces/repos get ingested and carries
@@ -80,6 +94,14 @@ type GitHostFilter struct {
 // at the end of its loop body, so a mid-baseline failure preserves
 // progress for repos already processed.
 //
+// Per-repo errors are non-fatal: the repo is reported via RepoFailed,
+// counted in stats.ReposFailed, and the loop continues. Watermarks for a
+// failed repo stay unset so the next baseline retries it; completed repos
+// retain theirs and stream only new commits/PRs. When anything failed the
+// call returns an error wrapping ErrPartialFailure so the CLI can decide
+// between warning and aborting — the persisted state is consistent either
+// way.
+//
 // reporter receives progress events; pass nil to discard them.
 func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, reporter progress.Reporter, filter GitHostFilter) (GitHostStats, error) {
 	if reporter == nil {
@@ -104,6 +126,7 @@ func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, repo
 	if err != nil {
 		return stats, fmt.Errorf("list workspaces: %w", err)
 	}
+	var firstErr error
 	for _, ws := range workspaces {
 		if wantWorkspace != "" && ws.Slug != wantWorkspace {
 			continue
@@ -111,9 +134,21 @@ func IngestGitHost(ctx context.Context, s *store.Store, gh githost.GitHost, repo
 		if ctx.Err() != nil {
 			return stats, ErrInterrupted
 		}
-		if err := ingestWorkspace(ctx, s.DB(), gh, provider, ws, now, reporter, &stats, filter); err != nil {
-			return stats, err
+		if err := ingestWorkspace(ctx, s.DB(), gh, provider, ws, now, reporter, &stats, filter, &firstErr); err != nil {
+			// Workspace-level failures (upsert, ListRepos) are fatal only
+			// when the context is gone; otherwise report and continue so
+			// the remaining workspaces still get tried.
+			if errors.Is(err, ErrInterrupted) || ctx.Err() != nil {
+				return stats, err
+			}
+			if firstErr == nil {
+				firstErr = err
+			}
+			reporter.RepoFailed(ws.Slug, err)
 		}
+	}
+	if firstErr != nil {
+		return stats, fmt.Errorf("%w (first error: %v)", ErrPartialFailure, firstErr)
 	}
 	return stats, nil
 }
@@ -128,6 +163,7 @@ func ingestWorkspace(
 	reporter progress.Reporter,
 	stats *GitHostStats,
 	filter GitHostFilter,
+	firstErr *error,
 ) error {
 	if err := upsertWorkspace(ctx, db, provider, ws, now); err != nil {
 		return err
@@ -157,8 +193,12 @@ func ingestWorkspace(
 	// mid-write, so their watermarks are saved and the next run resumes
 	// cleanly. That means the repo work must NOT observe the signal
 	// cancellation: it runs under a detached context. The signal context
-	// (ctx) is only consulted to stop scheduling *new* repos. A genuine
-	// repo error still cancels its siblings via gctx (fail-fast).
+	// (ctx) is only consulted to stop scheduling *new* repos.
+	//
+	// A repo error does NOT cancel its siblings: long baselines shouldn't
+	// lose hours of progress to one renamed repo or bad credential. The
+	// failure is reported, counted, and remembered in *firstErr; the failed
+	// repo's watermark stays unset so the next run retries it.
 	workCtx := context.WithoutCancel(ctx)
 	g, gctx := errgroup.WithContext(workCtx)
 	g.SetLimit(repoIngestConcurrency)
@@ -168,6 +208,12 @@ func ingestWorkspace(
 		if filter.Repo != "" && repo.FullName() != filter.Repo {
 			continue
 		}
+		if repo.Archived {
+			// Read-only upstream: its history can't change, so spending
+			// commit/PR API budget on it every run is pure waste.
+			stats.ReposSkippedArchived++
+			continue
+		}
 		if ctx.Err() != nil {
 			interrupted = true
 			break
@@ -175,24 +221,32 @@ func ingestWorkspace(
 		repo := repo
 		g.Go(func() error {
 			nCommits, nPRs, err := ingestRepo(gctx, db, gh, provider, repo, now, reporter, filter.SquashMergeRecovery, filter.Since)
-			if err != nil {
-				return err
-			}
 			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				stats.ReposFailed++
+				if *firstErr == nil {
+					*firstErr = fmt.Errorf("repo %s: %w", repo.FullName(), err)
+				}
+				reporter.RepoFailed(repo.FullName(), err)
+				return nil
+			}
 			stats.Repos++
 			stats.Commits += nCommits
 			stats.PullRequests += nPRs
-			mu.Unlock()
 			return nil
 		})
 	}
-	if err := g.Wait(); err != nil {
-		return err
-	}
+	_ = g.Wait() // per-repo errors are swallowed above; nothing else returns one
 	if interrupted {
 		// Don't advance the workspace watermark: the workspace isn't fully
 		// indexed. (It isn't read for skipping anyway, but keep it honest.)
 		return ErrInterrupted
+	}
+	if *firstErr != nil {
+		// Same rule for partial workspaces: leave the watermark unset so
+		// the next baseline revisits this workspace's failed repos.
+		return nil
 	}
 	return advanceWorkspaceWatermark(workCtx, db, provider, ws.Slug, now)
 }

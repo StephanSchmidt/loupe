@@ -32,6 +32,10 @@ type Reporter interface {
 	RepoBackoff(fullName string, attempt int, delay time.Duration)
 	// RepoDone marks a repo finished with its commit and PR counts.
 	RepoDone(fullName string, commits, prs int)
+	// RepoFailed marks a repo (or workspace) as failed with the error that
+	// stopped it. Ingest continues with the remaining repos; the failed
+	// one's watermark stays unset so the next run retries it.
+	RepoFailed(fullName string, err error)
 	// Stop flushes any final state and releases the terminal. After Stop
 	// the Reporter must not be used again.
 	Stop()
@@ -48,6 +52,7 @@ func (nopReporter) RepoStart(string)                        {}
 func (nopReporter) RepoProgress(string, int, int)           {}
 func (nopReporter) RepoBackoff(string, int, time.Duration)  {}
 func (nopReporter) RepoDone(string, int, int)               {}
+func (nopReporter) RepoFailed(string, error)                {}
 func (nopReporter) Stop()                                   {}
 
 // Plain returns a Reporter that writes one line per event to w. It mirrors
@@ -88,6 +93,10 @@ func (p *plainReporter) RepoBackoff(name string, attempt int, d time.Duration) {
 
 func (p *plainReporter) RepoDone(name string, commits, prs int) {
 	p.line("    ✓ %s: %d commits, %d PRs", name, commits, prs)
+}
+
+func (p *plainReporter) RepoFailed(name string, err error) {
+	p.line("    ✗ %s: FAILED — %v", name, err)
 }
 
 func (p *plainReporter) Stop() {}

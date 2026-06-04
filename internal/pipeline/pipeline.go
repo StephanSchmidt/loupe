@@ -162,7 +162,14 @@ func runIngest(ctx context.Context, opts *Options, s *store.Store, gh githost.Gi
 		Since:               opts.Since,
 	})
 	reporter.Stop()
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, ingest.ErrPartialFailure) && ghStats.Commits > 0:
+		// Some repos failed but real data landed — warn and keep going so
+		// the deck still renders. Failed repos kept no watermark, so the
+		// next run retries exactly the missing work.
+		_, _ = fmt.Fprintf(out, "\n  WARNING: %v\n  Continuing with partial data — re-run to retry the failed repos.\n", err)
+	default:
 		if errors.Is(err, context.Canceled) {
 			_, _ = fmt.Fprintln(out, "\nInterrupted — progress saved. Run the command again to continue.")
 		}
@@ -170,6 +177,12 @@ func runIngest(ctx context.Context, opts *Options, s *store.Store, gh githost.Gi
 	}
 	_, _ = fmt.Fprintf(out, "  %d workspaces, %d repos, %d commits, %d PRs\n",
 		ghStats.Workspaces, ghStats.Repos, ghStats.Commits, ghStats.PullRequests)
+	if ghStats.ReposSkippedArchived > 0 {
+		_, _ = fmt.Fprintf(out, "  %d archived repos skipped\n", ghStats.ReposSkippedArchived)
+	}
+	if ghStats.ReposFailed > 0 {
+		_, _ = fmt.Fprintf(out, "  %d repos failed (will be retried next run)\n", ghStats.ReposFailed)
+	}
 
 	// Always index the tracker too — even when git-host had nothing new the
 	// tracker may have new tickets, or may never have been ingested at all.
