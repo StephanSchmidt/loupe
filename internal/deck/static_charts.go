@@ -326,7 +326,7 @@ func renderStaticWIP(rows []analyze.WIPWeek, cutover analyze.Cutover, outPath, f
 		LabelCount:    staticLabelCount(len(labels)),
 	}
 	opt.Legend = charts.LegendOption{SeriesNames: []string{"In Progress", "Not Started"}}
-	opt.YAxis = intValueAxis()
+	opt.ValueAxis = intValueAxis()
 
 	p := charts.NewPainter(charts.PainterOptions{
 		Width:        staticChartWidth,
@@ -377,7 +377,7 @@ func renderStaticRepoAdoption(rows []analyze.RepoAdoptionWeek, cutover analyze.C
 		LabelCount:    staticLabelCount(len(labels)),
 	}
 	opt.Legend = charts.LegendOption{SeriesNames: []string{"AI-enabled", "Active (≤90d)", "Inactive (>90d)"}}
-	opt.YAxis = intValueAxis()
+	opt.ValueAxis = intValueAxis()
 
 	p := charts.NewPainter(charts.PainterOptions{
 		Width:        staticChartWidth,
@@ -412,7 +412,7 @@ func renderStaticThroughput(weeks []analyze.WeekStats, cutover analyze.Cutover, 
 		LabelCount:    staticLabelCount(len(labels)),
 	}
 	opt.Legend = charts.LegendOption{SeriesNames: []string{"Human", "AI-tagged"}}
-	opt.YAxis = intValueAxis()
+	opt.ValueAxis = intValueAxis()
 
 	p := charts.NewPainter(charts.PainterOptions{
 		Width:        staticChartWidth,

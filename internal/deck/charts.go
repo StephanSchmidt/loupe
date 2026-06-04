@@ -391,17 +391,9 @@ func overlayCompare(opt map[string]any, name, color string, vals []*float64) {
 // glyph for company reference lines in the legend.
 const legendDashIcon = "path://M0,3 h8 v1.5 h-8 z M11,3 h8 v1.5 h-8 z M22,3 h8 v1.5 h-8 z"
 
-// weekStartsOfWeeks / …Cycles / …Defects / …BugFix extract the WeekStart axis
+// weekStartsOfWeeks / …Defects / …BugFix extract the WeekStart axis
 // of a focus series so alignByWeek can line the company values up with it.
 func weekStartsOfWeeks(rows []analyze.WeekStats) []time.Time {
-	out := make([]time.Time, len(rows))
-	for i, r := range rows {
-		out[i] = r.WeekStart
-	}
-	return out
-}
-
-func weekStartsOfCycles(rows []analyze.WeekCycle) []time.Time {
 	out := make([]time.Time, len(rows))
 	for i, r := range rows {
 		out[i] = r.WeekStart
