@@ -237,7 +237,7 @@ type ticketForCycle struct {
 
 func loadTicketsForCycle(ctx context.Context, db *sql.DB, scope Scope) ([]ticketForCycle, error) {
 	filt, args := scope.ticketFilter("project_key")
-	rows, err := db.QueryContext(ctx, `SELECT id, type, created_at FROM tickets WHERE 1=1`+filt, args...)
+	rows, err := db.QueryContext(ctx, `SELECT id, type, created_at FROM tickets WHERE 1=1`+filt, args...) // #nosec G202 -- filt is a fixed fragment from ticketFilter; values are parametrized
 	if err != nil {
 		return nil, fmt.Errorf("load tickets: %w", err)
 	}
