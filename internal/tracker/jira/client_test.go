@@ -119,7 +119,7 @@ func TestListIssues_PaginatedAndDecoded(t *testing.T) {
 		if r.URL.Path != "/rest/api/3/search/jql" {
 			t.Errorf("path = %q", r.URL.Path)
 		}
-		if !strings.Contains(r.URL.Query().Get("jql"), "project = ENG") {
+		if !strings.Contains(r.URL.Query().Get("jql"), `project = "ENG"`) {
 			t.Errorf("jql = %q", r.URL.Query().Get("jql"))
 		}
 		switch r.URL.Query().Get("nextPageToken") {
@@ -297,5 +297,49 @@ func TestName(t *testing.T) {
 	}
 	if c.Name() != Provider {
 		t.Errorf("Name = %q, want %q", c.Name(), Provider)
+	}
+}
+
+// TestListIssues_ReservedKeywordProjectKeyIsQuoted reproduces the
+// user-observed failure: a Jira project keyed "IN" (a JQL reserved word)
+// hit `project = IN` and got a 400 "Expecting either a value, list or
+// function but got 'IN'". With the quoting helper, the JQL becomes
+// `project = "IN"` and parses as a string literal.
+func TestListIssues_ReservedKeywordProjectKeyIsQuoted(t *testing.T) {
+	var seenJQL string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenJQL = r.URL.Query().Get("jql")
+		mustJSON(t, w, map[string]any{"issues": []any{}})
+	}))
+	defer srv.Close()
+
+	c := newClient(t, srv)
+	for _, err := range c.ListIssues(context.Background(), "IN", time.Time{}) {
+		if err != nil {
+			t.Fatalf("stream: %v", err)
+		}
+	}
+	want := `project = "IN" ORDER BY updated DESC`
+	if seenJQL != want {
+		t.Errorf("JQL = %q, want %q", seenJQL, want)
+	}
+}
+
+func TestJQLQuoteString(t *testing.T) {
+	cases := []struct {
+		in, want string
+	}{
+		{"ENG", `"ENG"`},
+		{"IN", `"IN"`},
+		{"AND", `"AND"`},
+		{"", `""`},
+		{`with"quote`, `"with\"quote"`},
+		{`with\backslash`, `"with\\backslash"`},
+		{`both\and"chars`, `"both\\and\"chars"`},
+	}
+	for _, tc := range cases {
+		if got := jqlQuoteString(tc.in); got != tc.want {
+			t.Errorf("jqlQuoteString(%q) = %q, want %q", tc.in, got, tc.want)
+		}
 	}
 }

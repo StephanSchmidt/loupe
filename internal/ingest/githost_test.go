@@ -2,12 +2,15 @@ package ingest
 
 import (
 	"context"
+	"errors"
 	"iter"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/StephanSchmidt/loupe/internal/githost"
+	"github.com/StephanSchmidt/loupe/internal/progress"
 	"github.com/StephanSchmidt/loupe/internal/store"
 )
 
@@ -27,6 +30,11 @@ type fakeGitHost struct {
 	measureConc bool
 	curConc     int32
 	peakConc    int32
+	// commitErr, when set for a "ws/repo" key, makes ListCommits yield
+	// that error as the very first iteration result — used by tests that
+	// simulate a real-world failure mid-baseline (renamed repo 301, ACL
+	// drift, transient that exhausted retries, …).
+	commitErr map[string]error
 }
 
 func (f *fakeGitHost) Name() string { return "fake-vcs" }
@@ -41,7 +49,12 @@ func (f *fakeGitHost) ListRepos(_ context.Context, ws string) ([]githost.Repo, e
 
 func (f *fakeGitHost) ListCommits(_ context.Context, repo githost.RepoRef, since time.Time) iter.Seq2[githost.Commit, error] {
 	commits := f.commits[repo.FullName()]
+	commitErr := f.commitErr[repo.FullName()]
 	return func(yield func(githost.Commit, error) bool) {
+		if commitErr != nil {
+			yield(githost.Commit{}, commitErr)
+			return
+		}
 		if f.measureConc {
 			n := atomic.AddInt32(&f.curConc, 1)
 			for {
@@ -423,3 +436,144 @@ func contains(s, sub string) bool {
 	}
 	return false
 }
+
+// TestIngestGitHost_SkipsArchivedRepos verifies that archived repos are
+// skipped before any commit/PR fetch and counted in
+// stats.ReposSkippedArchived — so a workspace of 2000 mostly-archived
+// repos doesn't burn API budget on read-only history.
+func TestIngestGitHost_SkipsArchivedRepos(t *testing.T) {
+	s, err := store.Open(store.MemoryPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	createdAt := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	fake := &fakeGitHost{
+		workspaces: []githost.Workspace{{Slug: "acme", Name: "Acme"}},
+		repos: map[string][]githost.Repo{
+			"acme": {
+				{RepoRef: githost.RepoRef{Workspace: "acme", Slug: "live"}, Name: "live"},
+				{RepoRef: githost.RepoRef{Workspace: "acme", Slug: "old"}, Name: "old", Archived: true},
+				{RepoRef: githost.RepoRef{Workspace: "acme", Slug: "ancient"}, Name: "ancient", Archived: true},
+			},
+		},
+		commits: map[string][]githost.Commit{
+			"acme/live":    {{SHA: "l1", AuthorEmail: "x@y", AuthorName: "X", CommittedAt: createdAt, Message: "ok"}},
+			"acme/old":     {{SHA: "o1", AuthorEmail: "x@y", AuthorName: "X", CommittedAt: createdAt, Message: "must not be fetched"}},
+			"acme/ancient": {{SHA: "a1", AuthorEmail: "x@y", AuthorName: "X", CommittedAt: createdAt, Message: "must not be fetched"}},
+		},
+	}
+
+	stats, err := IngestGitHost(context.Background(), s, fake, nil, GitHostFilter{})
+	if err != nil {
+		t.Fatalf("ingest: %v", err)
+	}
+
+	if stats.Repos != 1 {
+		t.Errorf("stats.Repos = %d, want 1", stats.Repos)
+	}
+	if stats.ReposSkippedArchived != 2 {
+		t.Errorf("stats.ReposSkippedArchived = %d, want 2", stats.ReposSkippedArchived)
+	}
+	if stats.Commits != 1 {
+		t.Errorf("stats.Commits = %d, want 1 (archived repos must not be fetched)", stats.Commits)
+	}
+
+	assertCount(t, s, `SELECT COUNT(*) FROM repos WHERE full_name = 'acme/old'`, 0)
+	assertCount(t, s, `SELECT COUNT(*) FROM repos WHERE full_name = 'acme/ancient'`, 0)
+	assertCount(t, s, `SELECT COUNT(*) FROM commits WHERE sha IN ('o1', 'a1')`, 0)
+}
+
+// TestIngestGitHost_PerRepoFailureIsResumable simulates the 24h-into-
+// baseline failure: one repo in the middle of the workspace errors out
+// (here a synthetic 301-equivalent). The run must:
+//   - keep going past the bad repo,
+//   - leave the bad repo's commit watermark unset (so the next baseline
+//     retries it),
+//   - persist the other repos' watermarks (so the next baseline skips
+//     them),
+//   - return an error wrapping ErrPartialFailure so the caller knows the
+//     run was partial,
+//   - report the failure to the progress reporter for the operator.
+func TestIngestGitHost_PerRepoFailureIsResumable(t *testing.T) {
+	s, err := store.Open(store.MemoryPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	at := time.Date(2026, 5, 1, 0, 0, 0, 0, time.UTC)
+	fake := &fakeGitHost{
+		workspaces: []githost.Workspace{{Slug: "acme", Name: "Acme"}},
+		repos: map[string][]githost.Repo{
+			"acme": {
+				{RepoRef: githost.RepoRef{Workspace: "acme", Slug: "first"}, Name: "first"},
+				{RepoRef: githost.RepoRef{Workspace: "acme", Slug: "broken"}, Name: "broken"},
+				{RepoRef: githost.RepoRef{Workspace: "acme", Slug: "third"}, Name: "third"},
+			},
+		},
+		commits: map[string][]githost.Commit{
+			"acme/first": {{SHA: "x1", AuthorEmail: "x@y", AuthorName: "X", CommittedAt: at, Message: "ok"}},
+			"acme/third": {{SHA: "x3", AuthorEmail: "x@y", AuthorName: "X", CommittedAt: at, Message: "ok"}},
+		},
+		commitErr: map[string]error{
+			"acme/broken": errMovedPermanently,
+		},
+	}
+
+	var buf strings.Builder
+	stats, err := IngestGitHost(context.Background(), s, fake, progress.Plain(&buf), GitHostFilter{})
+	if err == nil {
+		t.Fatal("expected non-nil error for partial-failure run")
+	}
+	if !errors.Is(err, ErrPartialFailure) {
+		t.Errorf("error %q does not wrap ErrPartialFailure", err)
+	}
+	if !contains(err.Error(), "acme/broken") {
+		t.Errorf("error %q does not mention failed repo", err)
+	}
+
+	if stats.ReposFailed != 1 {
+		t.Errorf("stats.ReposFailed = %d, want 1", stats.ReposFailed)
+	}
+	if stats.Commits != 2 {
+		t.Errorf("stats.Commits = %d, want 2 (first+third still ingested)", stats.Commits)
+	}
+
+	// Failed repo: row inserted (we upsert before streaming) but commit
+	// watermark stays NULL/0 so the next baseline retries from the
+	// beginning.
+	var wm int64
+	row := s.DB().QueryRow(`SELECT COALESCE(last_commit_indexed_at, 0) FROM repos WHERE full_name = 'acme/broken'`)
+	if err := row.Scan(&wm); err != nil {
+		t.Fatalf("read broken watermark: %v", err)
+	}
+	if wm != 0 {
+		t.Errorf("acme/broken watermark = %d, want 0 (so next run retries)", wm)
+	}
+
+	// Completed repos: watermark set so the next baseline skips them.
+	row = s.DB().QueryRow(`SELECT last_commit_indexed_at FROM repos WHERE full_name = 'acme/first'`)
+	if err := row.Scan(&wm); err != nil || wm == 0 {
+		t.Errorf("acme/first watermark = %d (err=%v), want non-zero", wm, err)
+	}
+	row = s.DB().QueryRow(`SELECT last_commit_indexed_at FROM repos WHERE full_name = 'acme/third'`)
+	if err := row.Scan(&wm); err != nil || wm == 0 {
+		t.Errorf("acme/third watermark = %d (err=%v), want non-zero", wm, err)
+	}
+
+	if out := buf.String(); !contains(out, "acme/broken: FAILED") {
+		t.Errorf("progress output missing FAILED line: %q", out)
+	}
+}
+
+// errMovedPermanently mirrors the error message shape callers see after
+// the github client exhausts its redirect-follow budget (or hits a
+// non-redirect 301 path). Used as a synthetic stand-in so the ingest
+// test doesn't need a live HTTP server.
+var errMovedPermanently = errMoved("github GET /repos/acme/broken/commits returned 301: Moved Permanently")
+
+type errMoved string
+
+func (e errMoved) Error() string { return string(e) }

@@ -8,11 +8,13 @@ package apiclient
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -192,6 +194,10 @@ type StatusError struct {
 	Path       string
 	Body       string
 	Provider   string
+	// Headers carries the response headers (e.g. X-RateLimit-Reset,
+	// Retry-After, Location) so provider-specific callers can implement
+	// custom retry/redirect policies on top of the shared client.
+	Headers http.Header
 }
 
 func (e *StatusError) Error() string {
@@ -286,7 +292,7 @@ func (c *Client) retryDelay(resp *http.Response, attempt int) (time.Duration, bo
 	}
 	switch {
 	case resp.StatusCode == http.StatusTooManyRequests:
-		if d, ok := parseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
+		if d, ok := ParseRetryAfter(resp.Header.Get("Retry-After"), time.Now()); ok {
 			if d > maxRetryAfter {
 				return 0, false
 			}
@@ -313,6 +319,7 @@ func (c *Client) toStatusError(resp *http.Response, method, path string) error {
 		Path:       path,
 		Body:       string(respBody),
 		Provider:   c.displayName(),
+		Headers:    resp.Header,
 	}
 }
 
@@ -323,13 +330,15 @@ func (c *Client) displayName() string {
 	return "api"
 }
 
-// parseRetryAfter converts an HTTP Retry-After header value to a duration.
+// ParseRetryAfter converts an HTTP Retry-After header value to a duration.
 // Per RFC 9110 §10.2.3 it can be either a non-negative integer (seconds)
 // or an HTTP-date. The second return is true when the header carried a
 // usable hint — "0" yields (0, true) while an absent/invalid header
 // yields (0, false), so callers can distinguish "retry now" from "don't
-// retry".
-func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
+// retry". Exported so provider clients can read the hint off a
+// StatusError's Headers when implementing policies beyond the shared
+// retry (e.g. GitHub's hour-long primary-limit waits).
+func ParseRetryAfter(value string, now time.Time) (time.Duration, bool) {
 	if value == "" {
 		return 0, false
 	}
@@ -347,6 +356,44 @@ func parseRetryAfter(value string, now time.Time) (time.Duration, bool) {
 		return d, true
 	}
 	return 0, false
+}
+
+// transientMarkers are substrings that identify retriable transport-level
+// failures by error message. We resort to string matching because Go's
+// stdlib HTTP/2 implementation is vendored — its error types (e.g.
+// http2.StreamError) aren't reachable via errors.As from user code.
+var transientMarkers = []string{
+	"stream error",     // http2 RST_STREAM (CANCEL, REFUSED_STREAM, INTERNAL_ERROR, …)
+	"GOAWAY",           // http2 connection drain
+	"connection reset", // ECONNRESET
+	"broken pipe",      // EPIPE on write
+}
+
+// IsTransientErr reports whether err looks like a retriable transport
+// failure: an HTTP/2 stream cancel, a connection reset, an unexpected EOF
+// mid-body, or a server GOAWAY. *StatusError (HTTP non-2xx) is explicitly
+// excluded — those are application-level responses, not transport faults.
+//
+// Idempotent GETs may retry on these errors; non-idempotent requests
+// should still surface them so the caller can decide.
+func IsTransientErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	var se *StatusError
+	if errors.As(err, &se) {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	msg := err.Error()
+	for _, marker := range transientMarkers {
+		if strings.Contains(msg, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // DecodeJSON reads and decodes a JSON response body into dest, then closes

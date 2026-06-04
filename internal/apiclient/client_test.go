@@ -2,7 +2,9 @@ package apiclient
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -190,9 +192,9 @@ func TestParseRetryAfter(t *testing.T) {
 		{"Wed, 21 Oct 2026 07:27:00 GMT", 0, true}, // past → retry immediately
 	}
 	for _, c := range cases {
-		gotDur, gotOK := parseRetryAfter(c.in, now)
+		gotDur, gotOK := ParseRetryAfter(c.in, now)
 		if gotDur != c.wantDur || gotOK != c.wantOK {
-			t.Errorf("parseRetryAfter(%q) = (%v, %v), want (%v, %v)", c.in, gotDur, gotOK, c.wantDur, c.wantOK)
+			t.Errorf("ParseRetryAfter(%q) = (%v, %v), want (%v, %v)", c.in, gotDur, gotOK, c.wantDur, c.wantOK)
 		}
 	}
 }
@@ -255,5 +257,41 @@ func TestDecodeJSON_MalformedSurfacesSnippet(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), `body: {"oops":}`) {
 		t.Errorf("error didn't include body snippet: %v", err)
+	}
+}
+
+func TestIsTransientErr(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"nil", nil, false},
+		{"http2 stream cancel (real format)", errors.New("stream error: stream ID 7825; CANCEL; received from peer"), true},
+		{"http2 stream refused", errors.New("stream error: stream ID 12; REFUSED_STREAM"), true},
+		{"http2 stream internal", errors.New("stream error: stream ID 5; INTERNAL_ERROR"), true},
+		{"connection reset", errors.New("read tcp 1.2.3.4:80: connection reset by peer"), true},
+		{"broken pipe", errors.New("write tcp: broken pipe"), true},
+		{"http2 goaway", errors.New("http2: server sent GOAWAY and closed the connection"), true},
+		{"unexpected EOF wrapped", fmt.Errorf("read response body: %w", io.ErrUnexpectedEOF), true},
+		{"plain EOF (not retriable on its own)", io.EOF, false},
+		{"status error not transient", &StatusError{StatusCode: 500, Provider: "x", Method: "GET", Path: "/y", Body: "boom"}, false},
+		{"wrapped status error not transient", fmt.Errorf("list things: %w", &StatusError{StatusCode: 502}), false},
+		{"random error", errors.New("something else"), false},
+		{
+			"full nested user-observed chain",
+			fmt.Errorf("stream PRs acme/feature: %w",
+				fmt.Errorf("list PRs acme/feature: %w",
+					fmt.Errorf("read response body: %w",
+						errors.New("stream error: stream ID 7825; CANCEL; received from peer")))),
+			true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := IsTransientErr(tc.err); got != tc.want {
+				t.Errorf("IsTransientErr(%v) = %v, want %v", tc.err, got, tc.want)
+			}
+		})
 	}
 }
