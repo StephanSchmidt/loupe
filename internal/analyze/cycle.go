@@ -201,6 +201,22 @@ func WeeklyCyclesScoped(ctx context.Context, s *store.Store, cfg CycleConfig, sc
 	return out, nil
 }
 
+// SplitCycleByCutover splits the weekly cycle series at the cutover week
+// (before is strictly earlier). Mirrors SplitDefectsByCutover.
+func SplitCycleByCutover(weeks []WeekCycle, cutover Cutover) (before, after []WeekCycle) {
+	if !cutover.Detected {
+		return weeks, nil
+	}
+	for _, w := range weeks {
+		if w.WeekStart.Before(cutover.Date) {
+			before = append(before, w)
+		} else {
+			after = append(after, w)
+		}
+	}
+	return before, after
+}
+
 func normaliseStatuses(in []string) map[string]struct{} {
 	out := make(map[string]struct{}, len(in))
 	for _, s := range in {

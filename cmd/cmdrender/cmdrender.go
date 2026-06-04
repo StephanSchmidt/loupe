@@ -121,11 +121,27 @@ func renderFromStore(ctx context.Context, out io.Writer, cfg *config.Config, s *
 	if err != nil {
 		return fmt.Errorf("bug-fix speed: %w", err)
 	}
+	prcycle, err := analyze.WeeklyPRCycle(ctx, s)
+	if err != nil {
+		return fmt.Errorf("PR cycle: %w", err)
+	}
+	retention, err := analyze.ComputeRetention(ctx, s)
+	if err != nil {
+		return fmt.Errorf("retention: %w", err)
+	}
+	repoLanding, err := analyze.ComputeRepoLanding(ctx, s, deck.LandingTopRepos, cfg.Windows.DisplayMonths)
+	if err != nil {
+		return fmt.Errorf("repo landing: %w", err)
+	}
+	teamLanding, err := analyze.ComputeTeamLanding(ctx, s, deck.TeamSpecs(cfg), cfg.Windows.DisplayMonths)
+	if err != nil {
+		return fmt.Errorf("team landing: %w", err)
+	}
 	focus, err := deck.ComputeFocus(ctx, s, cfg)
 	if err != nil {
 		return fmt.Errorf("focus: %w", err)
 	}
-	if err := deck.RenderDeck(deckDir, cfg, weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, focus, tools, time.Now().UTC()); err != nil {
+	if err := deck.RenderDeck(deckDir, cfg, weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, prcycle, retention, teamLanding, repoLanding, focus, tools, time.Now().UTC()); err != nil {
 		return fmt.Errorf("render deck: %w", err)
 	}
 	_, _ = fmt.Fprintf(out, "Deck ready: %s/index.html\n", deckDir)

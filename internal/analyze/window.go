@@ -54,3 +54,8 @@ func WindowDefects(rows []DefectWeek, months int) []DefectWeek {
 func WindowBugFix(rows []BugFixWeek, months int) []BugFixWeek {
 	return windowByMonths(rows, months, func(r BugFixWeek) time.Time { return r.WeekStart })
 }
+
+// WindowPRCycle restricts weekly PR-velocity stats to the last `months` months.
+func WindowPRCycle(rows []PRWeek, months int) []PRWeek {
+	return windowByMonths(rows, months, func(r PRWeek) time.Time { return r.WeekStart })
+}

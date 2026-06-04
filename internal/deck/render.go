@@ -34,6 +34,7 @@ type DeckData struct {
 	ReportDate          time.Time
 	WindowStart         time.Time
 	WindowEnd           time.Time
+	DisplayMonths       int // chart window length (config display_months / --months)
 	TotalCommits        int
 	AICommits           int
 	AICommitPct         float64
@@ -82,6 +83,39 @@ type DeckData struct {
 	BugLeadBefore    float64 // median engineering days, bug cohort, pre-cutover
 	BugLeadAfter     float64
 	OtherLeadOverall float64 // median engineering days, non-bug cohort, whole window
+
+	// Lead-time before/after (median dev→release days) — added for #3 so the
+	// Lead-time slide gets a before/after verdict like the others.
+	LeadTimeHasCutover bool
+	LeadTimeBefore     float64
+	LeadTimeAfter      float64
+
+	// Significance verdicts (#3) on each before↔after delta. Hidden when no
+	// cutover or too few weeks to test.
+	ProductivityVerdict Verdict
+	RevertVerdict       Verdict
+	BugRateVerdict      Verdict
+	BugFixVerdict       Verdict
+	LeadTimeVerdict     Verdict
+
+	// AI Impact Scorecard (#10): three-axis synthesis of the labelled deltas.
+	ScorecardAvailable bool
+	ScorecardSummary   string // one-line verdict across the three axes
+	Scorecard          []ScorecardAxis
+
+	// PR cycle velocity (#5). Available only once merge-time data is ingested.
+	PRCycleAvailable  bool
+	PRCycleHasCutover bool
+	PRDaysBefore      float64 // median days-to-merge before cutover
+	PRDaysAfter       float64
+	PRMergedPerWeek   float64 // mean merged PRs/week over the window
+	PRCycleVerdict    Verdict
+
+	// AI-adoption retention (#7) headline.
+	RetentionAvailable bool
+	RetentionWeeks     int     // K — weeks-since-adoption used for the headline
+	RetentionRate      float64 // % still using AI at week K
+	RetentionAdopters  int     // cohort size at week 0
 
 	// Stats panel — distribution summaries derived from Weeks. Populated
 	// when there are ≥2 weeks of data; the template hides the slide when
@@ -135,6 +169,10 @@ func RenderDeck(
 	wip []analyze.WIPWeek,
 	defects []analyze.DefectWeek,
 	bugfix []analyze.BugFixWeek,
+	prcycle []analyze.PRWeek,
+	retention []analyze.RetentionPoint,
+	teamLanding []analyze.Landing,
+	repoLanding []analyze.Landing,
 	focus []FocusData,
 	tools analyze.ToolBreakdownStats,
 	reportDate time.Time,
@@ -152,6 +190,9 @@ func RenderDeck(
 	wip = analyze.WindowWIP(wip, cfg.Windows.DisplayMonths)
 	defects = analyze.WindowDefects(defects, cfg.Windows.DisplayMonths)
 	bugfix = analyze.WindowBugFix(bugfix, cfg.Windows.DisplayMonths)
+	prcycle = analyze.WindowPRCycle(prcycle, cfg.Windows.DisplayMonths)
+	// retention (weeks-since-adoption) and landing (window aggregate) are not
+	// calendar-windowed here.
 	m := cfg.Windows.DisplayMonths
 	for i := range focus {
 		focus[i].Weeks = analyze.WindowWeeks(focus[i].Weeks, m)
@@ -160,18 +201,19 @@ func RenderDeck(
 		focus[i].WIP = analyze.WindowWIP(focus[i].WIP, m)
 		focus[i].Defects = analyze.WindowDefects(focus[i].Defects, m)
 		focus[i].BugFix = analyze.WindowBugFix(focus[i].BugFix, m)
+		focus[i].PRCycle = analyze.WindowPRCycle(focus[i].PRCycle, m)
 	}
 
 	if err := copyEmbeddedAssets(filepath.Join(deckDir, "assets")); err != nil {
 		return err
 	}
 
-	payload, err := BuildChartPayload(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, focus)
+	payload, err := BuildChartPayload(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, prcycle, retention, teamLanding, repoLanding, focus)
 	if err != nil {
 		return fmt.Errorf("build chart payload: %w", err)
 	}
 
-	if err := RenderStaticCharts(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, filepath.Join(deckDir, "charts")); err != nil {
+	if err := RenderStaticCharts(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, prcycle, filepath.Join(deckDir, "charts")); err != nil {
 		return fmt.Errorf("render static charts: %w", err)
 	}
 
@@ -179,6 +221,11 @@ func RenderDeck(
 	populateDefectSummary(&data, defects, cutover)
 	populateProductivitySummary(&data, weeks, cutover)
 	populateBugFixSummary(&data, bugfix, cutover)
+	populatePRSummary(&data, prcycle, cutover)
+	populateRetentionSummary(&data, retention)
+	// Significance + scorecard run last: they read BugFixHasCutover set above
+	// and operate on the same windowed cohorts the headlines use.
+	populateSignificance(&data, weeks, defects, bugfix, cycles, cutover)
 	data.Tools = tools.Tools
 	data.ToolsAvailable = len(tools.Tools) > 0
 	data.ToolsCommitsTotal = tools.DistinctCommits
@@ -251,6 +298,56 @@ func populateBugFixSummary(d *DeckData, bugfix []analyze.BugFixWeek, cutover ana
 	}
 }
 
+// populatePRSummary fills the PR-velocity headline: mean merged/week, and
+// median days-to-merge before vs after cutover with a significance verdict.
+// Gated by minMergedPRs, so it self-hides until merge-time data is ingested.
+func populatePRSummary(d *DeckData, prcycle []analyze.PRWeek, cutover analyze.Cutover) {
+	_, perWeek, n := analyze.PRCycleSummary(prcycle)
+	if n < minMergedPRs {
+		return
+	}
+	d.PRCycleAvailable = true
+	d.PRMergedPerWeek = perWeek
+	if cutover.Detected {
+		before, after := analyze.SplitPRByCutover(prcycle, cutover)
+		if len(before) > 0 && len(after) > 0 {
+			bd, _, _ := analyze.PRCycleSummary(before)
+			ad, _, _ := analyze.PRCycleSummary(after)
+			d.PRDaysBefore = bd
+			d.PRDaysAfter = ad
+			d.PRCycleHasCutover = true
+			delta := analyze.BootstrapDelta(analyze.PRToMergeSeries(before), analyze.PRToMergeSeries(after), true)
+			d.PRCycleVerdict = verdictFromDelta(delta)
+		}
+	}
+}
+
+// populateRetentionSummary fills the retention headline: of the adopter cohort,
+// the share still using AI at the furthest week with an adequate cohort.
+func populateRetentionSummary(d *DeckData, retention []analyze.RetentionPoint) {
+	if len(retention) < 3 {
+		return
+	}
+	d.RetentionAvailable = true
+	d.RetentionAdopters = retention[0].Cohort
+	// Headline the 1-month (4-week) horizon — the standard retention point and
+	// the one that exposes a honeymoon drop. Fall back to the last available
+	// point when the curve is shorter.
+	pick := retention[len(retention)-1]
+	for _, p := range retention {
+		if p.WeeksSinceAdoption == retentionHeadlineWeek {
+			pick = p
+			break
+		}
+	}
+	d.RetentionWeeks = pick.WeeksSinceAdoption
+	d.RetentionRate = pick.Rate
+}
+
+// retentionHeadlineWeek is the weeks-since-adoption horizon used for the
+// retention headline (1 month).
+const retentionHeadlineWeek = 4
+
 // populateDefectSummary fills the quality-counterweight headline: overall
 // revert/bug rates and, when a cutover splits the window, before vs after.
 func populateDefectSummary(d *DeckData, defects []analyze.DefectWeek, cutover analyze.Cutover) {
@@ -267,6 +364,204 @@ func populateDefectSummary(d *DeckData, defects []analyze.DefectWeek, cutover an
 			d.RevertRateAfter, d.BugRateAfter, _ = analyze.DefectRates(after)
 		}
 	}
+}
+
+// Verdict is the rendered significance label for one before↔after delta — a
+// short phrase plus a CSS state class (good/bad/noise). Show is false when the
+// cohort is too thin to test, so the template can omit the chip entirely.
+type Verdict struct {
+	Show  bool
+	Label string
+	Class string // "good" | "bad" | "noise"
+}
+
+// ScorecardAxis is one row of the AI Impact Scorecard: a metric's before→after
+// with a direction arrow, good/bad/flat state, and a confidence label.
+type ScorecardAxis struct {
+	Name       string // metric, direction-intuitive: Output / dev | Lead time | Reverts & bugs
+	Headline   string // sub-label, e.g. "commits per active dev"
+	BeforeText string
+	AfterText  string
+	ChangeText string // "+36%" etc., or "—" when undefined
+	Arrow      string // ▲ | ▼ | ◼
+	State      string // good | bad | flat
+	Verdict    string // "improved · high confidence" | "within noise" | "too few weeks"
+	Sub        string // optional secondary line (e.g. bug rate)
+}
+
+// scoreVerdict turns a good/bad/flat state plus a significance level into the
+// explicit badge phrase, so meaning never rests on color alone — a green "−48%"
+// on "Reverts & bugs" reads "improved", not "quality fell".
+func scoreVerdict(state string, conf analyze.SigLevel) string {
+	switch conf {
+	case analyze.SigInsufficient:
+		return "too few weeks"
+	case analyze.SigNoise:
+		return "within noise"
+	}
+	word := "improved"
+	if state == "bad" {
+		word = "regressed"
+	}
+	if conf == analyze.SigMedium {
+		return word + " · likely (90%)"
+	}
+	return word + " · high confidence"
+}
+
+func stateClass(better bool) string {
+	if better {
+		return "good"
+	}
+	return "bad"
+}
+
+func verdictFromDelta(d analyze.Delta) Verdict {
+	switch d.Confidence {
+	case analyze.SigHigh:
+		return Verdict{Show: true, Label: "statistically meaningful", Class: stateClass(d.Better)}
+	case analyze.SigMedium:
+		return Verdict{Show: true, Label: "likely meaningful (90%)", Class: stateClass(d.Better)}
+	case analyze.SigNoise:
+		return Verdict{Show: true, Label: "within noise", Class: "noise"}
+	default: // insufficient
+		return Verdict{Show: false}
+	}
+}
+
+func confidenceLabel(c analyze.SigLevel) string {
+	switch c {
+	case analyze.SigHigh:
+		return "high confidence"
+	case analyze.SigMedium:
+		return "likely (90%)"
+	case analyze.SigNoise:
+		return "within noise"
+	default:
+		return "too few weeks"
+	}
+}
+
+// axisFromValues builds a scorecard axis whose displayed before/after EXACTLY
+// match the corresponding slide's headline (the aggregate numbers), while the
+// significance verdict comes from the bootstrap on per-week samples. Direction
+// is derived from the displayed values so the arrow can never contradict the
+// numbers; it's shown only when the bootstrap clears the noise bar.
+func axisFromValues(name, headline string, before, after float64, lowerIsBetter bool, conf analyze.SigLevel, fmtVal func(float64) string) ScorecardAxis {
+	abs := after - before
+	meaningful := conf == analyze.SigHigh || conf == analyze.SigMedium
+	arrow, state := "◼", "flat"
+	if meaningful && abs != 0 {
+		if abs > 0 {
+			arrow = "▲"
+		} else {
+			arrow = "▼"
+		}
+		better := (abs > 0) != lowerIsBetter
+		state = stateClass(better)
+	}
+	change := "—"
+	if before != 0 {
+		denom := before
+		if denom < 0 {
+			denom = -denom
+		}
+		change = fmt.Sprintf("%+.0f%%", abs/denom*100)
+	}
+	return ScorecardAxis{
+		Name: name, Headline: headline,
+		BeforeText: fmtVal(before), AfterText: fmtVal(after),
+		ChangeText: change, Arrow: arrow, State: state,
+		Verdict: scoreVerdict(state, conf),
+	}
+}
+
+// populateSignificance (#3 + #10) bootstraps a confidence verdict for each
+// before↔after delta on the windowed cohorts, sets the per-slide Verdict
+// chips, and synthesises the three-axis AI Impact Scorecard. Reads
+// BugFixHasCutover, so it must run after populateBugFixSummary.
+func populateSignificance(d *DeckData, weeks []analyze.WeekStats, defects []analyze.DefectWeek, bugfix []analyze.BugFixWeek, cycles []analyze.WeekCycle, cutover analyze.Cutover) {
+	if !cutover.Detected {
+		return
+	}
+	bw, aw := analyze.SplitByCutover(weeks, cutover)
+	if len(bw) == 0 || len(aw) == 0 {
+		return
+	}
+	days := func(v float64) string { return fmt.Sprintf("%.1f d", v) }
+	pct := func(v float64) string { return fmt.Sprintf("%.1f%%", v) }
+	num := func(v float64) string { return fmt.Sprintf("%.1f", v) }
+
+	prodDelta := analyze.BootstrapDelta(analyze.ProductivitySeries(bw), analyze.ProductivitySeries(aw), false)
+	d.ProductivityVerdict = verdictFromDelta(prodDelta)
+
+	var revDelta, bugDelta analyze.Delta
+	haveQuality := false
+	if bd, ad := analyze.SplitDefectsByCutover(defects, cutover); len(bd) > 0 && len(ad) > 0 {
+		revDelta = analyze.BootstrapDelta(analyze.RevertSeries(bd), analyze.RevertSeries(ad), true)
+		bugDelta = analyze.BootstrapDelta(analyze.BugRateSeries(bd), analyze.BugRateSeries(ad), true)
+		d.RevertVerdict = verdictFromDelta(revDelta)
+		d.BugRateVerdict = verdictFromDelta(bugDelta)
+		haveQuality = true
+	}
+
+	var bugfixDelta analyze.Delta
+	if d.BugFixHasCutover {
+		bb, ab := analyze.SplitBugFixByCutover(bugfix, cutover)
+		bugfixDelta = analyze.BootstrapDelta(analyze.BugFixSeries(bb), analyze.BugFixSeries(ab), true)
+		d.BugFixVerdict = verdictFromDelta(bugfixDelta)
+	}
+
+	var leadDelta analyze.Delta
+	haveSpeed := false
+	if bc, ac := analyze.SplitCycleByCutover(cycles, cutover); len(bc) > 0 && len(ac) > 0 {
+		leadDelta = analyze.BootstrapDelta(analyze.LeadTimeSeries(bc), analyze.LeadTimeSeries(ac), true)
+		d.LeadTimeBefore = leadDelta.Before
+		d.LeadTimeAfter = leadDelta.After
+		d.LeadTimeHasCutover = true
+		d.LeadTimeVerdict = verdictFromDelta(leadDelta)
+		haveSpeed = true
+	}
+
+	// Display the SAME before/after numbers the individual slides show
+	// (aggregate where the slide uses aggregate); the bootstrap supplies only
+	// the confidence + direction. This keeps the scorecard consistent with
+	// every slide it summarises.
+	axes := []ScorecardAxis{
+		axisFromValues("Output / dev", "commits per active dev",
+			d.ProductivityBefore, d.ProductivityAfter, false, prodDelta.Confidence, num),
+	}
+	if haveSpeed {
+		ax := axisFromValues("Lead time", "dev → release",
+			d.LeadTimeBefore, d.LeadTimeAfter, true, leadDelta.Confidence, days)
+		if d.BugFixHasCutover {
+			ax.Sub = fmt.Sprintf("Bug-fix %s→%s (%s)", days(d.BugLeadBefore), days(d.BugLeadAfter), confidenceLabel(bugfixDelta.Confidence))
+		}
+		axes = append(axes, ax)
+	}
+	if haveQuality {
+		// Bug rate is the headline quality metric (more meaningful than reverts);
+		// revert rate rides as the secondary line. Fall back to revert when the
+		// tracker has no bug-typed tickets.
+		if d.DefectsHasBugs {
+			ax := axisFromValues("Bugs & reverts", "bug rate",
+				d.BugRateBefore, d.BugRateAfter, true, bugDelta.Confidence, pct)
+			ax.Sub = fmt.Sprintf("Revert rate %s→%s (%s)", pct(d.RevertRateBefore), pct(d.RevertRateAfter), confidenceLabel(revDelta.Confidence))
+			axes = append(axes, ax)
+		} else {
+			ax := axisFromValues("Reverts", "revert rate",
+				d.RevertRateBefore, d.RevertRateAfter, true, revDelta.Confidence, pct)
+			axes = append(axes, ax)
+		}
+	}
+	d.Scorecard = axes
+	d.ScorecardAvailable = true
+
+	parts := make([]string, 0, len(axes))
+	for _, a := range axes {
+		parts = append(parts, fmt.Sprintf("%s %s %s (%s)", a.Name, a.ChangeText, a.Arrow, a.Verdict))
+	}
+	d.ScorecardSummary = strings.Join(parts, " · ")
 }
 
 func buildDeckData(
@@ -319,6 +614,7 @@ func buildDeckData(
 		}
 	}
 
+	d.DisplayMonths = cfg.Windows.DisplayMonths
 	if d.TotalCommits > 0 {
 		d.AICommitPct = float64(d.AICommits) / float64(d.TotalCommits) * 100
 	}

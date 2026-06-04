@@ -238,6 +238,73 @@
   .reveal .caveats ul { margin: 0.2em 0 0.6em; }
   .reveal .caveats p { margin: 0.4em 0; }
 
+  /* AI Impact Scorecard — three axis cards with direction + confidence */
+  .reveal .scorecard-grid {
+    display: flex;
+    gap: 16px;
+    margin: 0.6em 0 0.4em;
+  }
+  .reveal .scorecard-grid > div {
+    flex: 1;
+    background: var(--bg-elev);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 0.7em 0.8em;
+    text-align: left;
+  }
+  .reveal .score-axis {
+    font-size: 0.5em;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--fg-muted);
+    margin: 0 0 0.15em;
+    font-weight: 600;
+  }
+  .reveal .score-headline {
+    font-size: 1.5em;
+    font-weight: 700;
+    line-height: 1.1;
+    margin: 0 0 0.12em;
+    display: flex;
+    align-items: baseline;
+    gap: 0.25em;
+  }
+  .reveal .score-arrow { font-size: 0.9em; }
+  .reveal .score-prepost { font-size: 0.5em; color: var(--fg-muted); margin: 0.1em 0; }
+  .reveal .score-sub { font-size: 0.42em; color: var(--fg-dim); margin: 0.1em 0 0; }
+  .reveal .score-badge {
+    display: inline-block;
+    font-size: 0.42em;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    padding: 0.2em 0.6em;
+    border-radius: 999px;
+    margin-top: 0.25em;
+    border: 1px solid var(--border);
+  }
+  /* good / bad / flat state coloring — reuses the chart palette */
+  .reveal .state-good { color: #22c55e; }
+  .reveal .state-bad  { color: #ef4444; }
+  .reveal .state-flat { color: var(--fg-dim); }
+  .reveal .state-good.score-badge { background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.4); }
+  .reveal .state-bad.score-badge  { background: rgba(239,68,68,0.12); border-color: rgba(239,68,68,0.4); }
+  .reveal .state-flat.score-badge { background: rgba(107,114,128,0.12); }
+  .reveal .scorecard-summary { font-size: 0.7em; color: var(--fg); margin: 0.2em 0 0; }
+
+  /* Inline significance chip appended to before/after headlines (#3) */
+  .reveal .verdict {
+    font-size: 0.85em;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    padding: 0.1em 0.5em;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    white-space: nowrap;
+  }
+  .reveal .verdict.good  { color: #22c55e; background: rgba(34,197,94,0.10); }
+  .reveal .verdict.bad   { color: #ef4444; background: rgba(239,68,68,0.10); }
+  .reveal .verdict.noise { color: var(--fg-dim); background: rgba(107,114,128,0.10); }
+
   /* Brand logo — fixed to the viewport so it rides above every slide.
      Sits outside .reveal so it isn't affected by reveal's slide-scale transform. */
   .deck-logo {
@@ -292,6 +359,29 @@
   </aside>
 </section>
 
+{{ if .ScorecardAvailable }}
+<section data-chart="scorecard">
+  <p class="eyebrow">AI Impact Scorecard</p>
+  <h2>Before AI → after, with confidence</h2>
+  <div class="scorecard-grid">
+    {{ range .Scorecard }}
+    <div>
+      <p class="score-axis">{{ .Name }} · {{ .Headline }}</p>
+      <p class="score-headline"><span class="state-{{ .State }}">{{ .ChangeText }}</span> <span class="score-arrow state-{{ .State }}">{{ .Arrow }}</span></p>
+      <p class="score-prepost">{{ .BeforeText }} → {{ .AfterText }}</p>
+      {{ if .Sub }}<p class="score-sub">{{ .Sub }}</p>{{ end }}
+      <span class="score-badge state-{{ .State }}">{{ .Verdict }}</span>
+    </div>
+    {{ end }}
+  </div>
+  <p class="scorecard-summary">{{ .ScorecardSummary }}</p>
+  <p class="footnote">Direction is the metric's raw move; color marks better (green) / worse (red) / no real change (gray). Confidence is a bootstrap test on the weekly values either side of the cutover — "within noise" means this 6-month window can't tell the change apart from zero.</p>
+  <aside class="notes">
+    The honest one-liner the deck builds toward. Each axis: the before→after move, whether it's an improvement, and whether the window has enough signal to trust it. "Within noise" is not a failure — it's the correct verdict when the post-cutover cohort is too short to distinguish from random variation.
+  </aside>
+</section>
+{{ end }}
+
 <section data-chart="throughput">
   <h2>Weekly throughput</h2>
   <div id="throughput-chart" class="chart"></div>
@@ -310,7 +400,7 @@
   <h2>Output per active developer</h2>
   <div id="productivity-chart" class="chart"></div>
   <p class="footnote">
-    {{ if .ProductivityHasCutover }}<span class="accent">{{ printf "%.1f" .ProductivityBefore }}</span> commits/dev·week before AI → <span class="accent">{{ printf "%.1f" .ProductivityAfter }}</span> after.{{ end }}
+    {{ if .ProductivityHasCutover }}<span class="accent">{{ printf "%.1f" .ProductivityBefore }}</span> commits/dev·week before AI → <span class="accent">{{ printf "%.1f" .ProductivityAfter }}</span> after.{{ if .ProductivityVerdict.Show }} <span class="verdict {{ .ProductivityVerdict.Class }}">{{ .ProductivityVerdict.Label }}</span>{{ end }}{{ end }}
   </p>
   <aside class="notes">
     Weekly commits ÷ active developers that week, split human vs AI-tagged. Normalising by headcount separates "more output" from "more people" (hiring/attrition). Commit count is a coarse proxy — read the trend, not the absolute.
@@ -457,6 +547,7 @@
     {{ .CycleTickets }} tickets with lead-time data — median Wait (Create → dev start) <span class="accent">{{ .MedianIdeaToDevText }}</span>, median Cycle (dev start → last commit) <span class="accent">{{ .MedianDevToRelText }}</span>.
     {{ printf "%.0f%%" .CycleFallbackPct }} of tickets used first-commit fallback (no matching tracker transition).
   </p>
+  {{ if .LeadTimeHasCutover }}<p class="footnote">Median lead time <span class="accent">{{ printf "%.1f d" .LeadTimeBefore }}</span> before AI → <span class="accent">{{ printf "%.1f d" .LeadTimeAfter }}</span> after.{{ if .LeadTimeVerdict.Show }} <span class="verdict {{ .LeadTimeVerdict.Class }}">{{ .LeadTimeVerdict.Label }}</span>{{ end }}</p>{{ end }}
   <aside class="notes">
     Wait is ticket created → first tracker transition into a "dev started" status (or first commit, when no matching transition exists). Cycle is that moment → last commit on the ticket. Bars show the weekly median, so a few long-tail tickets don't distort the typical lead time.
   </aside>
@@ -474,7 +565,7 @@
   <h2>Bug-fix speed</h2>
   <div id="bugfix-chart" class="chart"></div>
   <p class="footnote">
-    {{ if .BugFixHasCutover }}Bug-fix engineering time <span class="accent">{{ printf "%.1f d" .BugLeadBefore }}</span> before AI → <span class="accent">{{ printf "%.1f d" .BugLeadAfter }}</span> after.{{ else }}Median bug-fix engineering time <span class="accent">{{ printf "%.1f d" .OtherLeadOverall }}</span> baseline (non-bug work).{{ end }}
+    {{ if .BugFixHasCutover }}Bug-fix engineering time <span class="accent">{{ printf "%.1f d" .BugLeadBefore }}</span> before AI → <span class="accent">{{ printf "%.1f d" .BugLeadAfter }}</span> after.{{ if .BugFixVerdict.Show }} <span class="verdict {{ .BugFixVerdict.Class }}">{{ .BugFixVerdict.Label }}</span>{{ end }}{{ else }}Median bug-fix engineering time <span class="accent">{{ printf "%.1f d" .OtherLeadOverall }}</span> baseline (non-bug work).{{ end }}
   </p>
   <aside class="notes">
     Median engineering time (dev start → last commit on the ticket) for defect-class tickets vs everything else, per ISO week. This isolates the part AI can plausibly speed — writing the fix — from triage wait (shown separately on the Lead-time slide). A falling Bug bar after the cutover is the "does AI fix bugs faster?" signal; compare it to the Other bar to rule out an org-wide speed-up. Medians, so a few long tails don't distort it.
@@ -486,6 +577,59 @@
   <div class="chart"></div>
 </section>
 {{ end }}{{ end }}
+{{ end }}
+
+{{ if .Charts.HasPRCycle }}
+<section data-chart="prcycle">
+  <h2>PR cycle velocity</h2>
+  <div id="prcycle-chart" class="chart"></div>
+  <p class="footnote">
+    {{ if .PRCycleHasCutover }}Median time to merge <span class="accent">{{ printf "%.1f d" .PRDaysBefore }}</span> before AI → <span class="accent">{{ printf "%.1f d" .PRDaysAfter }}</span> after.{{ if .PRCycleVerdict.Show }} <span class="verdict {{ .PRCycleVerdict.Class }}">{{ .PRCycleVerdict.Label }}</span>{{ end }} {{ end }}{{ printf "%.1f" .PRMergedPerWeek }} PRs merged/week on average.
+  </p>
+  <aside class="notes">
+    Median time from a pull request opening to merge, per ISO week (bucketed by merge week; bot-authored PRs excluded). The most direct "did AI speed delivery?" signal that isn't confounded by ticket hygiene. Review/approval latency isn't ingested, so this is open→merge end-to-end, not time-in-review.
+  </aside>
+</section>
+{{ range .Charts.Focus }}{{ if .PRCycleJSON }}
+<section data-chart="prcycle--{{ .Slug }}">
+  <h2>PR cycle velocity — {{ .Name }}</h2>
+  <div class="chart"></div>
+</section>
+{{ end }}{{ end }}
+{{ end }}
+
+{{ if .Charts.HasRetention }}
+<section data-chart="retention">
+  <h2>AI-adoption retention</h2>
+  <div id="retention-chart" class="chart"></div>
+  <p class="footnote">
+    <strong>How sticky is AI?</strong> Of <span class="accent">{{ .RetentionAdopters }}</span> developers who ever used AI, <span class="accent">{{ printf "%.0f%%" .RetentionRate }}</span> were still using it {{ .RetentionWeeks }} weeks later — the curve falling steeply then flattening means an initial trial drop-off, then a durable core.
+  </p>
+  <aside class="notes">
+    A survival curve. Every developer is lined up at their own "week 0" — the week of their first AI-tagged commit — regardless of calendar date. The line at week k is the share of adopters whose AI use lasted at least k weeks (i.e. their most recent AI commit is k+ weeks after their first). Developers who started too recently to have reached week k are excluded from it, so recent adopters don't drag the curve down. Reads left-to-right: a cliff = honeymoon (people try it once and stop); a high flat line = durable adoption.
+  </aside>
+</section>
+{{ end }}
+
+{{ if .Charts.HasLandingTeam }}
+<section data-chart="landingteam">
+  <h2>Where AI lands — by team</h2>
+  <div id="landingteam-chart" class="chart"></div>
+  <p class="footnote">AI-tagged share of commits over the last {{ .DisplayMonths }} months ({{ .WindowStart.Format "Jan 2" }} – {{ .WindowEnd.Format "Jan 2, 2006" }}).</p>
+  <aside class="notes">
+    AI-tagged share of commits per configured team over the window. Characterises where AI adoption concentrates — what leaders act on. Teams come from config; developers in no team are not shown.
+  </aside>
+</section>
+{{ end }}
+{{ if .Charts.HasLandingRepo }}
+<section data-chart="landingrepo">
+  <h2>Where AI lands — by repo</h2>
+  <div id="landingrepo-chart" class="chart"></div>
+  <p class="footnote">AI-tagged share of commits over the last {{ .DisplayMonths }} months ({{ .WindowStart.Format "Jan 2" }} – {{ .WindowEnd.Format "Jan 2, 2006" }}); repos under 20 commits excluded.</p>
+  <aside class="notes">
+    AI-tagged share of commits, for the repos with the highest AI adoption (repos under 20 commits are excluded as too small to characterise). This surfaces where AI concentrates — note that high-volume repos can still sit near 0%, so a few AI-heavy services here is the signal, not the whole picture.
+  </aside>
+</section>
 {{ end }}
 
 {{ if .Charts.HasWIP }}
@@ -512,7 +656,7 @@
     <strong>Revert rate</strong> = commits whose message starts “Revert ” ÷ all commits.{{ if .DefectsHasBugs }} <strong>Bug rate</strong> = Jira <code>Bug</code> tickets ÷ all tickets created that week.{{ end }}
   </p>
   <p class="footnote">
-    {{ if .DefectsHasCutover }}Revert rate <span class="accent">{{ printf "%.1f%%" .RevertRateBefore }}</span> before AI → <span class="accent">{{ printf "%.1f%%" .RevertRateAfter }}</span> after.{{ if .DefectsHasBugs }} Bug rate {{ printf "%.1f%%" .BugRateBefore }} → {{ printf "%.1f%%" .BugRateAfter }}.{{ end }}{{ else }}Revert rate <span class="accent">{{ printf "%.1f%%" .RevertRateOverall }}</span>{{ if .DefectsHasBugs }}, bug rate {{ printf "%.1f%%" .BugRateOverall }}{{ end }} over the window.{{ end }}
+    {{ if .DefectsHasCutover }}Revert rate <span class="accent">{{ printf "%.1f%%" .RevertRateBefore }}</span> before AI → <span class="accent">{{ printf "%.1f%%" .RevertRateAfter }}</span> after.{{ if .RevertVerdict.Show }} <span class="verdict {{ .RevertVerdict.Class }}">{{ .RevertVerdict.Label }}</span>{{ end }}{{ if .DefectsHasBugs }} Bug rate {{ printf "%.1f%%" .BugRateBefore }} → {{ printf "%.1f%%" .BugRateAfter }}.{{ if .BugRateVerdict.Show }} <span class="verdict {{ .BugRateVerdict.Class }}">{{ .BugRateVerdict.Label }}</span>{{ end }}{{ end }}{{ else }}Revert rate <span class="accent">{{ printf "%.1f%%" .RevertRateOverall }}</span>{{ if .DefectsHasBugs }}, bug rate {{ printf "%.1f%%" .BugRateOverall }}{{ end }} over the window.{{ end }}
   </p>
   <aside class="notes">
     Revert rate = commits whose message starts "Revert " — a floor, since roll-forward fixes and squash-hidden reverts are missed. Bug rate = Jira tickets of type Bug as a share of tickets created that week; it lags the work that caused it. Read this as a directional counterweight to the throughput gains, not a precise defect count.
@@ -558,7 +702,8 @@
       {{ if not .Charts.HasWIP }}<li>Work in progress (needs Jira tickets)</li>{{ end }}
       {{ if not .Charts.HasDefects }}<li>Defect rate / quality counterweight</li>{{ end }}
       {{ if not .Charts.HasBugFix }}<li>Bug-fix speed (needs enough bug-typed tickets with linked commits)</li>{{ end }}
-      <li>Per-team breakdown</li>
+      {{ if not .Charts.HasPRCycle }}<li>PR cycle velocity (needs a re-ingest to capture PR merge timestamps)</li>{{ end }}
+      {{ if not .Charts.HasLandingTeam }}<li>Per-team AI breakdown (needs <code>teams</code> in config)</li>{{ end }}
     </ul>
     <p>Cutover threshold: a week qualifies when AI-tagged commits reach <span class="accent">{{ printf "%.0f%%" .CutoverThresholdPct }}</span> of weekly commits.</p>
     <p class="muted">ROI is intentionally omitted — the assumption it requires (hours saved per AI-tagged commit) can't be defended in front of a skeptical CFO.</p>
@@ -581,6 +726,10 @@
   {{ if .Charts.HasWIP }}const wipOption = {{ .Charts.WIPJSON }};{{ end }}
   {{ if .Charts.HasDefects }}const defectsOption = {{ .Charts.DefectsJSON }};{{ end }}
   {{ if .Charts.HasBugFix }}const bugfixOption = {{ .Charts.BugFixJSON }};{{ end }}
+  {{ if .Charts.HasPRCycle }}const prcycleOption = {{ .Charts.PRCycleJSON }};{{ end }}
+  {{ if .Charts.HasRetention }}const retentionOption = {{ .Charts.RetentionJSON }};{{ end }}
+  {{ if .Charts.HasLandingTeam }}const landingTeamOption = {{ .Charts.LandingTeamJSON }};{{ end }}
+  {{ if .Charts.HasLandingRepo }}const landingRepoOption = {{ .Charts.LandingRepoJSON }};{{ end }}
   {{ if .Charts.HasCycle }}const cycleOption = {{ .Charts.CycleJSON }};{{ end }}
 
   // Cutover indices come alongside the option payloads. The cutover
@@ -595,6 +744,10 @@
     {{ if .Charts.HasWIP }}wip: wipOption,{{ end }}
     {{ if .Charts.HasDefects }}defects: defectsOption,{{ end }}
     {{ if .Charts.HasBugFix }}bugfix: bugfixOption,{{ end }}
+    {{ if .Charts.HasPRCycle }}prcycle: prcycleOption,{{ end }}
+    {{ if .Charts.HasRetention }}retention: retentionOption,{{ end }}
+    {{ if .Charts.HasLandingTeam }}landingteam: landingTeamOption,{{ end }}
+    {{ if .Charts.HasLandingRepo }}landingrepo: landingRepoOption,{{ end }}
     {{ if .Charts.HasCycle }}cycle: cycleOption,{{ end }}
     {{ range .Charts.Focus }}
     {{ if .ThroughputJSON }}"throughput--{{ .Slug }}": {{ .ThroughputJSON }},{{ end }}
@@ -604,6 +757,7 @@
     {{ if .HasWIP }}"wip--{{ .Slug }}": {{ .WIPJSON }},{{ end }}
     {{ if .HasDefects }}"defects--{{ .Slug }}": {{ .DefectsJSON }},{{ end }}
     {{ if .BugFixJSON }}"bugfix--{{ .Slug }}": {{ .BugFixJSON }},{{ end }}
+    {{ if .PRCycleJSON }}"prcycle--{{ .Slug }}": {{ .PRCycleJSON }},{{ end }}
     {{ if .HasCycle }}"cycle--{{ .Slug }}": {{ .CycleJSON }},{{ end }}
     {{ end }}
   };
@@ -615,6 +769,7 @@
     {{ if .Charts.HasWIP }}wip: {{ .Charts.WIPCutoverIdx }},{{ end }}
     {{ if .Charts.HasDefects }}defects: {{ .Charts.DefectsCutoverIdx }},{{ end }}
     {{ if .Charts.HasBugFix }}bugfix: {{ .Charts.BugFixCutoverIdx }},{{ end }}
+    {{ if .Charts.HasPRCycle }}prcycle: {{ .Charts.PRCycleCutoverIdx }},{{ end }}
     {{ if .Charts.HasCycle }}cycle: {{ .Charts.CycleCutoverIdx }},{{ end }}
     {{ range .Charts.Focus }}
     {{ if .ThroughputJSON }}"throughput--{{ .Slug }}": {{ .ThroughputCutoverIdx }},{{ end }}
@@ -624,6 +779,7 @@
     {{ if .HasWIP }}"wip--{{ .Slug }}": {{ .WIPCutoverIdx }},{{ end }}
     {{ if .HasDefects }}"defects--{{ .Slug }}": {{ .DefectsCutoverIdx }},{{ end }}
     {{ if .BugFixJSON }}"bugfix--{{ .Slug }}": {{ .BugFixCutoverIdx }},{{ end }}
+    {{ if .PRCycleJSON }}"prcycle--{{ .Slug }}": {{ .PRCycleCutoverIdx }},{{ end }}
     {{ if .HasCycle }}"cycle--{{ .Slug }}": {{ .CycleCutoverIdx }},{{ end }}
     {{ end }}
   };

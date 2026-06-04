@@ -39,7 +39,7 @@ var staticChartFormats = []string{"png", "svg"}
 // is available) cycle charts under chartsDir in every format in
 // staticChartFormats. PNG is the paste-into-Slack default; SVG is for
 // high-resolution embedding.
-func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, bugfix []analyze.BugFixWeek, chartsDir string) error {
+func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, bugfix []analyze.BugFixWeek, prcycle []analyze.PRWeek, chartsDir string) error {
 	if len(weeks) == 0 {
 		return fmt.Errorf("RenderStaticCharts: no weekly data")
 	}
@@ -84,6 +84,12 @@ func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycl
 			b := filepath.Join(chartsDir, "bugfix."+format)
 			if err := renderStaticBugFix(bugfix, cutover, b, format); err != nil {
 				return fmt.Errorf("bugfix %s: %w", format, err)
+			}
+		}
+		if _, _, n := analyze.PRCycleSummary(prcycle); n >= minMergedPRs {
+			p := filepath.Join(chartsDir, "prcycle."+format)
+			if err := renderStaticPRCycle(prcycle, cutover, p, format); err != nil {
+				return fmt.Errorf("prcycle %s: %w", format, err)
 			}
 		}
 		if len(cycles) == 0 {
@@ -242,6 +248,51 @@ func renderStaticBugFix(rows []analyze.BugFixWeek, cutover analyze.Cutover, outP
 	return writeStaticChart(p, outPath)
 }
 
+func renderStaticPRCycle(rows []analyze.PRWeek, cutover analyze.Cutover, outPath, format string) error {
+	labels := make([]string, len(rows))
+	days := make([]float64, len(rows))
+	prevYear := 0
+	cutoverIdx := -1
+	for i, r := range rows {
+		layout := "Jan 02"
+		if r.WeekStart.Year() != prevYear {
+			layout = "Jan 02 2006"
+		}
+		labels[i] = r.WeekStart.Format(layout)
+		prevYear = r.WeekStart.Year()
+		if cutover.Detected && r.WeekStart.Equal(cutover.Date) {
+			cutoverIdx = i
+		}
+		days[i] = r.MedianToMerge.Hours() / 24
+	}
+	if cutoverIdx >= 0 {
+		labels[cutoverIdx] = "▼ " + labels[cutoverIdx]
+	}
+
+	opt := charts.NewBarChartOptionWithData([][]float64{days})
+	opt.Title = charts.TitleOption{Text: "PR cycle velocity — median days to merge"}
+	if cutover.Detected {
+		opt.Title.Subtext = fmt.Sprintf("AI adoption cutover: %s (%s)",
+			cutover.Date.Format("Jan 2, 2006"), cutover.Reason)
+	}
+	opt.CategoryAxis = charts.CategoryAxisOption{
+		Labels:        labels,
+		LabelRotation: charts.DegreesToRadians(45),
+		LabelCount:    staticLabelCount(len(labels)),
+	}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"Median days to merge"}}
+
+	p := charts.NewPainter(charts.PainterOptions{
+		Width:        staticChartWidth,
+		Height:       staticChartHeight,
+		OutputFormat: format,
+	})
+	if err := p.BarChart(opt); err != nil {
+		return fmt.Errorf("bar chart: %w", err)
+	}
+	return writeStaticChart(p, outPath)
+}
+
 func renderStaticWIP(rows []analyze.WIPWeek, cutover analyze.Cutover, outPath, format string) error {
 	labels := make([]string, len(rows))
 	inProg := make([]float64, len(rows))
@@ -386,7 +437,9 @@ func renderStaticAdoption(weeks []analyze.WeekStats, cutover analyze.Cutover, ou
 		}
 	}
 
-	opt := charts.NewBarChartOptionWithData([][]float64{human, ai})
+	// AI at the bottom of the stack (anchored at 0), Human on top — mirrors the
+	// interactive adoption chart so the AI share reads from the baseline.
+	opt := charts.NewBarChartOptionWithData([][]float64{ai, human})
 	opt.StackSeries = charts.Ptr(true)
 	opt.Title = charts.TitleOption{Text: "AI adoption — % of weekly commits"}
 	if cutover.Detected {
@@ -398,7 +451,7 @@ func renderStaticAdoption(weeks []analyze.WeekStats, cutover analyze.Cutover, ou
 		LabelRotation: charts.DegreesToRadians(45),
 		LabelCount:    staticLabelCount(len(labels)),
 	}
-	opt.Legend = charts.LegendOption{SeriesNames: []string{"Human", "AI-tagged"}}
+	opt.Legend = charts.LegendOption{SeriesNames: []string{"AI-tagged", "Human"}}
 
 	p := charts.NewPainter(charts.PainterOptions{
 		Width:        staticChartWidth,
