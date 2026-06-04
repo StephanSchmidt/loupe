@@ -34,8 +34,27 @@ func WeeklyRepoAdoption(ctx context.Context, s *store.Store) ([]RepoAdoptionWeek
 	return WeeklyRepoAdoptionScoped(ctx, s, Scope{})
 }
 
+// repoAdoptionState is one repo's commit timeline for the adoption snapshot.
+type repoAdoptionState struct {
+	times   []int64 // commit unix times, ascending (query is ordered)
+	firstAI int64   // earliest AI-commit time; 0 means never
+}
+
 // WeeklyRepoAdoptionScoped is WeeklyRepoAdoption restricted to scope.Repos.
 func WeeklyRepoAdoptionScoped(ctx context.Context, s *store.Store, scope Scope) ([]RepoAdoptionWeek, error) {
+	repos, minT, maxT, err := loadRepoAdoption(ctx, s, scope)
+	if err != nil {
+		return nil, err
+	}
+	if len(repos) == 0 {
+		return nil, nil
+	}
+	return repoAdoptionSnapshots(repos, minT, maxT), nil
+}
+
+// loadRepoAdoption loads each (scoped) repo's commit timeline plus the overall
+// min/max commit time.
+func loadRepoAdoption(ctx context.Context, s *store.Store, scope Scope) (map[string]*repoAdoptionState, int64, int64, error) {
 	filt, args := scope.commitFilter("c.repo_name")
 	rows, err := s.DB().QueryContext(ctx, `
         SELECT c.repo_name, c.committed_at,
@@ -47,15 +66,11 @@ func WeeklyRepoAdoptionScoped(ctx context.Context, s *store.Store, scope Scope) 
         ORDER BY c.committed_at
     `, args...)
 	if err != nil {
-		return nil, fmt.Errorf("query repo adoption: %w", err)
+		return nil, 0, 0, fmt.Errorf("query repo adoption: %w", err)
 	}
 	defer func() { _ = rows.Close() }()
 
-	type repoState struct {
-		times   []int64 // commit unix times, ascending (query is ordered)
-		firstAI int64   // earliest AI-commit time; 0 means never
-	}
-	repos := map[string]*repoState{}
+	repos := map[string]*repoAdoptionState{}
 	var minT, maxT int64
 	first := true
 	for rows.Next() {
@@ -63,11 +78,11 @@ func WeeklyRepoAdoptionScoped(ctx context.Context, s *store.Store, scope Scope) 
 		var ts int64
 		var hasAI int
 		if err := rows.Scan(&name, &ts, &hasAI); err != nil {
-			return nil, fmt.Errorf("scan repo adoption row: %w", err)
+			return nil, 0, 0, fmt.Errorf("scan repo adoption row: %w", err)
 		}
 		r := repos[name]
 		if r == nil {
-			r = &repoState{}
+			r = &repoAdoptionState{}
 			repos[name] = r
 		}
 		r.times = append(r.times, ts)
@@ -83,12 +98,14 @@ func WeeklyRepoAdoptionScoped(ctx context.Context, s *store.Store, scope Scope) 
 		first = false
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("iterate repo adoption: %w", err)
+		return nil, 0, 0, fmt.Errorf("iterate repo adoption: %w", err)
 	}
-	if len(repos) == 0 {
-		return nil, nil
-	}
+	return repos, minT, maxT, nil
+}
 
+// repoAdoptionSnapshots takes the end-of-week adoption/activity snapshot for
+// every ISO week between the two timestamps.
+func repoAdoptionSnapshots(repos map[string]*repoAdoptionState, minT, maxT int64) []RepoAdoptionWeek {
 	windowSecs := int64(repoActivityWindow / time.Second)
 	startWk := IsoWeekStart(time.Unix(minT, 0))
 	endWk := IsoWeekStart(time.Unix(maxT, 0))
@@ -115,7 +132,7 @@ func WeeklyRepoAdoptionScoped(ctx context.Context, s *store.Store, scope Scope) 
 			WeekStart: wk, AIEnabled: aiEnabled, Active: active, Inactive: inactive,
 		})
 	}
-	return out, nil
+	return out
 }
 
 // latestAtOrBefore returns the largest value in the ascending slice that is

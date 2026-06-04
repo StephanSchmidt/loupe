@@ -173,6 +173,11 @@ func ComputeTeamLanding(ctx context.Context, s *store.Store, teams []TeamSpec, m
 			continue
 		}
 		l := byTeam[team]
+		if l == nil {
+			// Every email2team value was seeded into byTeam above; the guard
+			// is for nilaway's flow analysis, which can't link the two maps.
+			continue
+		}
 		l.Commits++
 		if c.hasAI {
 			l.AICommits++
@@ -181,7 +186,7 @@ func ComputeTeamLanding(ctx context.Context, s *store.Store, teams []TeamSpec, m
 	out := make([]Landing, 0, len(byTeam))
 	for _, t := range teams {
 		l := byTeam[t.Name]
-		if l.Commits == 0 {
+		if l == nil || l.Commits == 0 {
 			continue
 		}
 		l.Rate = rate(l.Commits, l.AICommits)

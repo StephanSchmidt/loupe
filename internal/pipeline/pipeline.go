@@ -253,63 +253,16 @@ func logCutover(out io.Writer, c analyze.Cutover) {
 // renderAndAnnounce computes the remaining deck inputs, renders the deck, and
 // prints where it landed. It returns the deck directory.
 func renderAndAnnounce(ctx context.Context, opts *Options, weeks []analyze.WeekStats, cutover analyze.Cutover, s *store.Store) (string, error) {
-	cc := analyze.CycleConfig{
-		DevStartedStatuses: opts.Cfg.CycleTime.DevStartedStatuses,
-		DoneStatuses:       opts.Cfg.CycleTime.DoneStatuses,
-		AbandonedStatuses:  opts.Cfg.CycleTime.AbandonedStatuses,
-		BugTypes:           opts.Cfg.CycleTime.BugTypes,
-	}
-	cycles, err := analyze.WeeklyCycles(ctx, s, cc)
-	if err != nil {
-		return "", fmt.Errorf("weekly cycles: %w", err)
-	}
-
 	runID := time.Now().UTC().Format("2006-01-02T15-04-05Z")
 	deckDir := filepath.Join(opts.Cfg.Output.Path, runID)
 	if err := os.MkdirAll(filepath.Dir(deckDir), 0o750); err != nil {
 		return "", fmt.Errorf("create reports dir: %w", err)
 	}
-	tools, err := analyze.ToolBreakdown(ctx, s)
+	in, err := deck.GatherInputs(ctx, s, opts.Cfg)
 	if err != nil {
-		return "", fmt.Errorf("tool breakdown: %w", err)
+		return "", err
 	}
-	repoAdoption, err := analyze.WeeklyRepoAdoption(ctx, s)
-	if err != nil {
-		return "", fmt.Errorf("repo adoption: %w", err)
-	}
-	wip, err := analyze.WeeklyWIP(ctx, s, cc)
-	if err != nil {
-		return "", fmt.Errorf("work in progress: %w", err)
-	}
-	defects, err := analyze.WeeklyDefects(ctx, s, opts.Cfg.CycleTime.BugTypes)
-	if err != nil {
-		return "", fmt.Errorf("defects: %w", err)
-	}
-	bugfix, err := analyze.WeeklyBugFix(ctx, s, cc)
-	if err != nil {
-		return "", fmt.Errorf("bug-fix speed: %w", err)
-	}
-	prcycle, err := analyze.WeeklyPRCycle(ctx, s)
-	if err != nil {
-		return "", fmt.Errorf("PR cycle: %w", err)
-	}
-	retention, err := analyze.ComputeRetention(ctx, s)
-	if err != nil {
-		return "", fmt.Errorf("retention: %w", err)
-	}
-	repoLanding, err := analyze.ComputeRepoLanding(ctx, s, deck.LandingTopRepos, opts.Cfg.Windows.DisplayMonths)
-	if err != nil {
-		return "", fmt.Errorf("repo landing: %w", err)
-	}
-	teamLanding, err := analyze.ComputeTeamLanding(ctx, s, deck.TeamSpecs(opts.Cfg), opts.Cfg.Windows.DisplayMonths)
-	if err != nil {
-		return "", fmt.Errorf("team landing: %w", err)
-	}
-	focus, err := deck.ComputeFocus(ctx, s, opts.Cfg)
-	if err != nil {
-		return "", fmt.Errorf("focus: %w", err)
-	}
-	if err := deck.RenderDeck(deckDir, opts.Cfg, weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, prcycle, retention, teamLanding, repoLanding, focus, tools, time.Now().UTC()); err != nil {
+	if err := deck.RenderDeck(deckDir, opts.Cfg, weeks, cutover, in, time.Now().UTC()); err != nil {
 		return "", fmt.Errorf("render deck: %w", err)
 	}
 	_, _ = fmt.Fprintf(opts.Out, "\nDeck ready: %s/index.html\n", deckDir)

@@ -18,6 +18,13 @@ type WIPWeek struct {
 	NotStarted int // open tickets still waiting to start
 }
 
+// wipTicketState tracks the three timestamps WIP snapshots need per ticket.
+type wipTicketState struct {
+	created int64
+	devAt   int64 // first dev-started transition; 0 = none
+	doneAt  int64 // first done transition; 0 = none
+}
+
 // WeeklyWIP returns one WIPWeek per ISO week spanning the ticket history. A
 // ticket is "in progress" from its first transition into a dev-started status
 // (reusing the cycle-time config) and drops out once it becomes terminal —
@@ -30,37 +37,44 @@ func WeeklyWIP(ctx context.Context, s *store.Store, cfg CycleConfig) ([]WIPWeek,
 // tickets query is enough — the transition scan skips any ticket not in the
 // loaded set.
 func WeeklyWIPScoped(ctx context.Context, s *store.Store, cfg CycleConfig, scope Scope) ([]WIPWeek, error) {
-	devWanted := normaliseStatuses(cfg.DevStartedStatuses)
-	// Terminal = done OR abandoned: both remove a ticket from WIP. Resolved
-	// timestamps below are the primary signal; this set is the fallback when
-	// a ticket has no resolution date (e.g. won't-do without a resolution).
-	terminal := normaliseStatuses(append(append([]string{}, cfg.DoneStatuses...), cfg.AbandonedStatuses...))
-
-	type ticketState struct {
-		created int64
-		devAt   int64 // first dev-started transition; 0 = none
-		doneAt  int64 // first done transition; 0 = none
+	tickets, err := loadWIPTickets(ctx, s, scope)
+	if err != nil {
+		return nil, err
 	}
-	tickets := map[string]*ticketState{}
+	if len(tickets) == 0 {
+		return nil, nil
+	}
+	if err := applyWIPTransitions(ctx, s, cfg, tickets); err != nil {
+		return nil, err
+	}
+	minT, maxT, ok := wipTimeBounds(tickets)
+	if !ok {
+		return nil, nil
+	}
+	return wipSnapshots(tickets, minT, maxT), nil
+}
 
+// loadWIPTickets loads every (scoped) ticket with its creation time and, when
+// present, its resolution time. The resolution timestamp is preferred over
+// status transitions — it captures every terminal status (Won't Do, Archived,
+// …), not just the ones in our transition done-set.
+func loadWIPTickets(ctx context.Context, s *store.Store, scope Scope) (map[string]*wipTicketState, error) {
 	tFilt, tArgs := scope.ticketFilter("project_key")
-	trows, err := s.DB().QueryContext(ctx, `SELECT id, created_at, resolved_at, closed_at FROM tickets WHERE 1=1`+tFilt, tArgs...)
+	rows, err := s.DB().QueryContext(ctx, `SELECT id, created_at, resolved_at, closed_at FROM tickets WHERE 1=1`+tFilt, tArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("load tickets: %w", err)
 	}
-	for trows.Next() {
+	defer func() { _ = rows.Close() }()
+
+	tickets := map[string]*wipTicketState{}
+	for rows.Next() {
 		var id string
 		var created int64
 		var resolved, closed sql.NullInt64
-		if err := trows.Scan(&id, &created, &resolved, &closed); err != nil {
-			_ = trows.Close()
+		if err := rows.Scan(&id, &created, &resolved, &closed); err != nil {
 			return nil, fmt.Errorf("scan ticket: %w", err)
 		}
-		t := &ticketState{created: created}
-		// Prefer the resolution timestamp — it captures every terminal
-		// status (Won't Do, Archived, …), not just the ones in our
-		// transition done-set. The transition fallback below only fires
-		// when neither timestamp is present.
+		t := &wipTicketState{created: created}
 		switch {
 		case resolved.Valid:
 			t.doneAt = resolved.Int64
@@ -69,25 +83,31 @@ func WeeklyWIPScoped(ctx context.Context, s *store.Store, cfg CycleConfig, scope
 		}
 		tickets[id] = t
 	}
-	if err := trows.Err(); err != nil {
-		_ = trows.Close()
+	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate tickets: %w", err)
 	}
-	_ = trows.Close()
-	if len(tickets) == 0 {
-		return nil, nil
-	}
+	return tickets, nil
+}
 
-	xrows, err := s.DB().QueryContext(ctx, `SELECT ticket_id, at, to_status FROM ticket_transitions ORDER BY at`)
+// applyWIPTransitions walks all status transitions in time order and stamps
+// each loaded ticket's first dev-started and (as a fallback when it has no
+// resolution timestamp) first terminal transition.
+func applyWIPTransitions(ctx context.Context, s *store.Store, cfg CycleConfig, tickets map[string]*wipTicketState) error {
+	devWanted := normaliseStatuses(cfg.DevStartedStatuses)
+	// Terminal = done OR abandoned: both remove a ticket from WIP.
+	terminal := normaliseStatuses(append(append([]string{}, cfg.DoneStatuses...), cfg.AbandonedStatuses...))
+
+	rows, err := s.DB().QueryContext(ctx, `SELECT ticket_id, at, to_status FROM ticket_transitions ORDER BY at`)
 	if err != nil {
-		return nil, fmt.Errorf("load transitions: %w", err)
+		return fmt.Errorf("load transitions: %w", err)
 	}
-	for xrows.Next() {
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
 		var id, status string
 		var at int64
-		if err := xrows.Scan(&id, &at, &status); err != nil {
-			_ = xrows.Close()
-			return nil, fmt.Errorf("scan transition: %w", err)
+		if err := rows.Scan(&id, &at, &status); err != nil {
+			return fmt.Errorf("scan transition: %w", err)
 		}
 		t := tickets[id]
 		if t == nil {
@@ -101,13 +121,15 @@ func WeeklyWIPScoped(ctx context.Context, s *store.Store, cfg CycleConfig, scope
 			t.doneAt = at
 		}
 	}
-	if err := xrows.Err(); err != nil {
-		_ = xrows.Close()
-		return nil, fmt.Errorf("iterate transitions: %w", err)
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("iterate transitions: %w", err)
 	}
-	_ = xrows.Close()
+	return nil
+}
 
-	var minT, maxT int64
+// wipTimeBounds returns the earliest and latest timestamp across all ticket
+// events; ok is false when no ticket carries any timestamp.
+func wipTimeBounds(tickets map[string]*wipTicketState) (minT, maxT int64, ok bool) {
 	first := true
 	for _, t := range tickets {
 		for _, v := range []int64{t.created, t.devAt, t.doneAt} {
@@ -123,10 +145,12 @@ func WeeklyWIPScoped(ctx context.Context, s *store.Store, cfg CycleConfig, scope
 			first = false
 		}
 	}
-	if first {
-		return nil, nil
-	}
+	return minT, maxT, !first
+}
 
+// wipSnapshots takes the end-of-week WIP snapshot for every ISO week between
+// the two timestamps.
+func wipSnapshots(tickets map[string]*wipTicketState, minT, maxT int64) []WIPWeek {
 	startWk := IsoWeekStart(time.Unix(minT, 0))
 	endWk := IsoWeekStart(time.Unix(maxT, 0))
 	var out []WIPWeek
@@ -148,5 +172,5 @@ func WeeklyWIPScoped(ctx context.Context, s *store.Store, cfg CycleConfig, scope
 		}
 		out = append(out, WIPWeek{WeekStart: wk, InProgress: inProgress, NotStarted: notStarted})
 	}
-	return out, nil
+	return out
 }

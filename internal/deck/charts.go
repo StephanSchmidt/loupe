@@ -183,10 +183,30 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 		BugFixCutoverIdx:       -1,
 		PRCycleCutoverIdx:      -1,
 	}
+	if err := out.addTrackerCharts(cycles, repoAdoption, wip, defects, cutover); err != nil {
+		return ChartPayload{}, err
+	}
+	if err := out.addDeliveryCharts(bugfix, prcycle, retention, teamLanding, repoLanding, cutover); err != nil {
+		return ChartPayload{}, err
+	}
+	org := buildOrgCompare(weeks, cycles, defects, bugfix, prcycle)
+	for _, f := range focus {
+		fp, err := buildFocusPayload(f, org, cutover)
+		if err != nil {
+			return ChartPayload{}, err
+		}
+		out.Focus = append(out.Focus, fp)
+	}
+	return out, nil
+}
+
+// addTrackerCharts fills the ticket-tracker-derived slides (lead time, repo
+// adoption, WIP, defects), each present only when its series has data.
+func (out *ChartPayload) addTrackerCharts(cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, cutover analyze.Cutover) error {
 	if len(cycles) > 0 {
 		cycle, idx, err := marshalCycleOption(cycles, cutover)
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal cycle option: %w", err)
+			return fmt.Errorf("marshal cycle option: %w", err)
 		}
 		out.CycleJSON = template.JS(cycle) // #nosec G203 -- JSON-encoded payload
 		out.CycleCutoverIdx = idx
@@ -195,7 +215,7 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	if len(repoAdoption) > 0 {
 		ra, idx, err := marshalRepoAdoptionOption(repoAdoption, cutover)
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal repo adoption option: %w", err)
+			return fmt.Errorf("marshal repo adoption option: %w", err)
 		}
 		out.RepoAdoptionJSON = template.JS(ra) // #nosec G203 -- JSON-encoded payload
 		out.RepoAdoptionCutoverIdx = idx
@@ -204,7 +224,7 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	if len(wip) > 0 {
 		w, idx, err := marshalWIPOption(wip, cutover)
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal WIP option: %w", err)
+			return fmt.Errorf("marshal WIP option: %w", err)
 		}
 		out.WIPJSON = template.JS(w) // #nosec G203 -- JSON-encoded payload
 		out.WIPCutoverIdx = idx
@@ -213,19 +233,25 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	if len(defects) > 0 {
 		d, idx, err := marshalDefectsOption(defects, cutover)
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal defects option: %w", err)
+			return fmt.Errorf("marshal defects option: %w", err)
 		}
 		out.DefectsJSON = template.JS(d) // #nosec G203 -- JSON-encoded payload
 		out.DefectsCutoverIdx = idx
 		out.HasDefects = true
 	}
+	return nil
+}
+
+// addDeliveryCharts fills the bug-fix, PR-velocity, retention, and landing
+// slides; each self-hides below its data floor.
+func (out *ChartPayload) addDeliveryCharts(bugfix []analyze.BugFixWeek, prcycle []analyze.PRWeek, retention []analyze.RetentionPoint, teamLanding, repoLanding []analyze.Landing, cutover analyze.Cutover) error {
 	// Bug-fix speed self-suppresses when too few tickets classify as bugs —
 	// this is what hides the slide on trackers that don't supply a bug-shaped
 	// type (Linear, GitLab) instead of rendering a misleading all-"Other" chart.
 	if _, _, bugN := analyze.BugFixLeadTimes(bugfix); bugN >= minBugCycles {
 		b, idx, err := marshalBugFixOption(bugfix, cutover)
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal bug-fix option: %w", err)
+			return fmt.Errorf("marshal bug-fix option: %w", err)
 		}
 		out.BugFixJSON = template.JS(b) // #nosec G203 -- JSON-encoded payload
 		out.BugFixCutoverIdx = idx
@@ -237,7 +263,7 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 		pr, idx := buildPRCycleOption(prcycle, cutover)
 		b, err := marshalOption(pr)
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal PR cycle option: %w", err)
+			return fmt.Errorf("marshal PR cycle option: %w", err)
 		}
 		out.PRCycleJSON = template.JS(b) // #nosec G203 -- JSON-encoded payload
 		out.PRCycleCutoverIdx = idx
@@ -246,7 +272,7 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	if len(retention) >= 3 {
 		r, err := marshalOption(buildRetentionOption(retention))
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal retention option: %w", err)
+			return fmt.Errorf("marshal retention option: %w", err)
 		}
 		out.RetentionJSON = template.JS(r) // #nosec G203 -- JSON-encoded payload
 		out.HasRetention = true
@@ -254,7 +280,7 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	if len(teamLanding) > 0 {
 		t, err := marshalOption(buildLandingOption("AI adoption by team", teamLanding))
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal team landing option: %w", err)
+			return fmt.Errorf("marshal team landing option: %w", err)
 		}
 		out.LandingTeamJSON = template.JS(t) // #nosec G203 -- JSON-encoded payload
 		out.HasLandingTeam = true
@@ -262,20 +288,12 @@ func BuildChartPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycle
 	if len(repoLanding) > 0 {
 		r, err := marshalOption(buildLandingOption("AI adoption by repo — highest-adoption repos", repoLanding))
 		if err != nil {
-			return ChartPayload{}, fmt.Errorf("marshal repo landing option: %w", err)
+			return fmt.Errorf("marshal repo landing option: %w", err)
 		}
 		out.LandingRepoJSON = template.JS(r) // #nosec G203 -- JSON-encoded payload
 		out.HasLandingRepo = true
 	}
-	org := buildOrgCompare(weeks, cycles, defects, bugfix, prcycle)
-	for _, f := range focus {
-		fp, err := buildFocusPayload(f, org, cutover)
-		if err != nil {
-			return ChartPayload{}, err
-		}
-		out.Focus = append(out.Focus, fp)
-	}
-	return out, nil
+	return nil
 }
 
 // orgCompare holds the org-wide per-ISO-week values used to draw the dashed
@@ -431,32 +449,9 @@ func buildFocusPayload(f FocusData, org orgCompare, cutover analyze.Cutover) (Fo
 		WIPCutoverIdx: -1, DefectsCutoverIdx: -1, BugFixCutoverIdx: -1, PRCycleCutoverIdx: -1, RepoAdoptionCutoverIdx: -1,
 	}
 	if len(f.Weeks) > 0 {
-		_, idx := axisLabelsAndCutover(f.Weeks, cutover)
-		thru, err := marshalOption(buildThroughputOption(f.Weeks, cutover))
-		if err != nil {
-			return fp, fmt.Errorf("focus %q throughput: %w", f.Name, err)
+		if err := addFocusCommitCharts(&fp, f, org, cutover); err != nil {
+			return fp, err
 		}
-		weekStarts := weekStartsOfWeeks(f.Weeks)
-		adoptOpt := buildAdoptionOption(f.Weeks, cutover)
-		overlayCompare(adoptOpt, "AI Avg Company", chartDefectRevert, alignByWeek(weekStarts, org.adopt))
-		adopt, err := marshalOption(adoptOpt)
-		if err != nil {
-			return fp, fmt.Errorf("focus %q adoption: %w", f.Name, err)
-		}
-		prodOpt := buildProductivityOption(f.Weeks, cutover)
-		// org.prod is TotalCommits/DistinctAuthors — the human+AI total per dev,
-		// so the line benchmarks the FULL stacked bar, not either segment.
-		overlayCompare(prodOpt, "Company Avg human + ai", chartCompare, alignByWeek(weekStarts, org.prod))
-		prod, err := marshalOption(prodOpt)
-		if err != nil {
-			return fp, fmt.Errorf("focus %q productivity: %w", f.Name, err)
-		}
-		fp.ThroughputJSON = template.JS(thru)   // #nosec G203
-		fp.AdoptionJSON = template.JS(adopt)    // #nosec G203
-		fp.ProductivityJSON = template.JS(prod) // #nosec G203
-		fp.ThroughputCutoverIdx = idx
-		fp.AdoptionCutoverIdx = idx
-		fp.ProductivityCutoverIdx = idx
 	}
 	// "AI-enabled repos" is a portfolio metric — a count of repos per week.
 	// Scoped to a focus's handful of repos it's meaningless, so it's
@@ -522,6 +517,39 @@ func buildFocusPayload(f FocusData, org orgCompare, cutover analyze.Cutover) (Fo
 		fp.HasCycle = true
 	}
 	return fp, nil
+}
+
+// addFocusCommitCharts fills a focus payload's commit-derived charts
+// (throughput, adoption, productivity), overlaying the dashed company
+// reference line on the normalized-rate ones.
+func addFocusCommitCharts(fp *FocusChartPayload, f FocusData, org orgCompare, cutover analyze.Cutover) error {
+	_, idx := axisLabelsAndCutover(f.Weeks, cutover)
+	thru, err := marshalOption(buildThroughputOption(f.Weeks, cutover))
+	if err != nil {
+		return fmt.Errorf("focus %q throughput: %w", f.Name, err)
+	}
+	weekStarts := weekStartsOfWeeks(f.Weeks)
+	adoptOpt := buildAdoptionOption(f.Weeks, cutover)
+	overlayCompare(adoptOpt, "AI Avg Company", chartDefectRevert, alignByWeek(weekStarts, org.adopt))
+	adopt, err := marshalOption(adoptOpt)
+	if err != nil {
+		return fmt.Errorf("focus %q adoption: %w", f.Name, err)
+	}
+	prodOpt := buildProductivityOption(f.Weeks, cutover)
+	// org.prod is TotalCommits/DistinctAuthors — the human+AI total per dev,
+	// so the line benchmarks the FULL stacked bar, not either segment.
+	overlayCompare(prodOpt, "Company Avg human + ai", chartCompare, alignByWeek(weekStarts, org.prod))
+	prod, err := marshalOption(prodOpt)
+	if err != nil {
+		return fmt.Errorf("focus %q productivity: %w", f.Name, err)
+	}
+	fp.ThroughputJSON = template.JS(thru)   // #nosec G203
+	fp.AdoptionJSON = template.JS(adopt)    // #nosec G203
+	fp.ProductivityJSON = template.JS(prod) // #nosec G203
+	fp.ThroughputCutoverIdx = idx
+	fp.AdoptionCutoverIdx = idx
+	fp.ProductivityCutoverIdx = idx
+	return nil
 }
 
 // focusHasBugTickets reports whether a focus's defect series carries any ticket

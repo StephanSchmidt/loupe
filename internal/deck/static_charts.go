@@ -48,59 +48,50 @@ func RenderStaticCharts(weeks []analyze.WeekStats, cutover analyze.Cutover, cycl
 	}
 
 	for _, format := range staticChartFormats {
-		thru := filepath.Join(chartsDir, "throughput."+format)
-		if err := renderStaticThroughput(weeks, cutover, thru, format); err != nil {
-			return fmt.Errorf("throughput %s: %w", format, err)
-		}
-		adopt := filepath.Join(chartsDir, "adoption."+format)
-		if err := renderStaticAdoption(weeks, cutover, adopt, format); err != nil {
-			return fmt.Errorf("adoption %s: %w", format, err)
-		}
-		prod := filepath.Join(chartsDir, "productivity."+format)
-		if err := renderStaticProductivity(weeks, cutover, prod, format); err != nil {
-			return fmt.Errorf("productivity %s: %w", format, err)
-		}
-		if len(repoAdoption) > 0 {
-			ra := filepath.Join(chartsDir, "repo-adoption."+format)
-			if err := renderStaticRepoAdoption(repoAdoption, cutover, ra, format); err != nil {
-				return fmt.Errorf("repo adoption %s: %w", format, err)
+		for _, j := range staticChartJobs(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, prcycle) {
+			out := filepath.Join(chartsDir, j.name+"."+format)
+			if err := j.render(out, format); err != nil {
+				return fmt.Errorf("%s %s: %w", j.name, format, err)
 			}
-		}
-		if len(wip) > 0 {
-			w := filepath.Join(chartsDir, "wip."+format)
-			if err := renderStaticWIP(wip, cutover, w, format); err != nil {
-				return fmt.Errorf("wip %s: %w", format, err)
-			}
-		}
-		if len(defects) > 0 {
-			d := filepath.Join(chartsDir, "defects."+format)
-			if err := renderStaticDefects(defects, cutover, d, format); err != nil {
-				return fmt.Errorf("defects %s: %w", format, err)
-			}
-		}
-		// Same minBugCycles floor as the interactive slide, so the export and
-		// the deck agree on when bug-fix speed has enough data to show.
-		if _, _, bugN := analyze.BugFixLeadTimes(bugfix); bugN >= minBugCycles {
-			b := filepath.Join(chartsDir, "bugfix."+format)
-			if err := renderStaticBugFix(bugfix, cutover, b, format); err != nil {
-				return fmt.Errorf("bugfix %s: %w", format, err)
-			}
-		}
-		if _, _, n := analyze.PRCycleSummary(prcycle); n >= minMergedPRs {
-			p := filepath.Join(chartsDir, "prcycle."+format)
-			if err := renderStaticPRCycle(prcycle, cutover, p, format); err != nil {
-				return fmt.Errorf("prcycle %s: %w", format, err)
-			}
-		}
-		if len(cycles) == 0 {
-			continue
-		}
-		cycle := filepath.Join(chartsDir, "cycle."+format)
-		if err := renderStaticCycle(cycles, cutover, cycle, format); err != nil {
-			return fmt.Errorf("cycle %s: %w", format, err)
 		}
 	}
 	return nil
+}
+
+// staticChartJob is one chart file to emit: its base filename and renderer.
+type staticChartJob struct {
+	name   string
+	render func(outPath, format string) error
+}
+
+// staticChartJobs assembles the charts to export: the three commit charts are
+// always present, the rest only when their series clears its data floor —
+// using the same gates as the interactive slides, so export and deck agree.
+func staticChartJobs(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, repoAdoption []analyze.RepoAdoptionWeek, wip []analyze.WIPWeek, defects []analyze.DefectWeek, bugfix []analyze.BugFixWeek, prcycle []analyze.PRWeek) []staticChartJob {
+	jobs := []staticChartJob{
+		{"throughput", func(p, f string) error { return renderStaticThroughput(weeks, cutover, p, f) }},
+		{"adoption", func(p, f string) error { return renderStaticAdoption(weeks, cutover, p, f) }},
+		{"productivity", func(p, f string) error { return renderStaticProductivity(weeks, cutover, p, f) }},
+	}
+	if len(repoAdoption) > 0 {
+		jobs = append(jobs, staticChartJob{"repo-adoption", func(p, f string) error { return renderStaticRepoAdoption(repoAdoption, cutover, p, f) }})
+	}
+	if len(wip) > 0 {
+		jobs = append(jobs, staticChartJob{"wip", func(p, f string) error { return renderStaticWIP(wip, cutover, p, f) }})
+	}
+	if len(defects) > 0 {
+		jobs = append(jobs, staticChartJob{"defects", func(p, f string) error { return renderStaticDefects(defects, cutover, p, f) }})
+	}
+	if _, _, bugN := analyze.BugFixLeadTimes(bugfix); bugN >= minBugCycles {
+		jobs = append(jobs, staticChartJob{"bugfix", func(p, f string) error { return renderStaticBugFix(bugfix, cutover, p, f) }})
+	}
+	if _, _, n := analyze.PRCycleSummary(prcycle); n >= minMergedPRs {
+		jobs = append(jobs, staticChartJob{"prcycle", func(p, f string) error { return renderStaticPRCycle(prcycle, cutover, p, f) }})
+	}
+	if len(cycles) > 0 {
+		jobs = append(jobs, staticChartJob{"cycle", func(p, f string) error { return renderStaticCycle(cycles, cutover, p, f) }})
+	}
+	return jobs
 }
 
 func renderStaticProductivity(weeks []analyze.WeekStats, cutover analyze.Cutover, outPath, format string) error {

@@ -164,17 +164,7 @@ func RenderDeck(
 	cfg *config.Config,
 	weeks []analyze.WeekStats,
 	cutover analyze.Cutover,
-	cycles []analyze.WeekCycle,
-	repoAdoption []analyze.RepoAdoptionWeek,
-	wip []analyze.WIPWeek,
-	defects []analyze.DefectWeek,
-	bugfix []analyze.BugFixWeek,
-	prcycle []analyze.PRWeek,
-	retention []analyze.RetentionPoint,
-	teamLanding []analyze.Landing,
-	repoLanding []analyze.Landing,
-	focus []FocusData,
-	tools analyze.ToolBreakdownStats,
+	in Inputs,
 	reportDate time.Time,
 ) error {
 	if err := os.MkdirAll(deckDir, 0o750); err != nil {
@@ -184,51 +174,51 @@ func RenderDeck(
 	// Restrict the time-series charts to the recent window so the axes stay
 	// readable. Older data still lives in the store and fed cutover
 	// detection upstream; it's only hidden from these charts.
-	weeks = analyze.WindowWeeks(weeks, cfg.Windows.DisplayMonths)
-	cycles = analyze.WindowCycles(cycles, cfg.Windows.DisplayMonths)
-	repoAdoption = analyze.WindowRepoAdoption(repoAdoption, cfg.Windows.DisplayMonths)
-	wip = analyze.WindowWIP(wip, cfg.Windows.DisplayMonths)
-	defects = analyze.WindowDefects(defects, cfg.Windows.DisplayMonths)
-	bugfix = analyze.WindowBugFix(bugfix, cfg.Windows.DisplayMonths)
-	prcycle = analyze.WindowPRCycle(prcycle, cfg.Windows.DisplayMonths)
+	m := cfg.Windows.DisplayMonths
+	weeks = analyze.WindowWeeks(weeks, m)
+	in.Cycles = analyze.WindowCycles(in.Cycles, m)
+	in.RepoAdoption = analyze.WindowRepoAdoption(in.RepoAdoption, m)
+	in.WIP = analyze.WindowWIP(in.WIP, m)
+	in.Defects = analyze.WindowDefects(in.Defects, m)
+	in.BugFix = analyze.WindowBugFix(in.BugFix, m)
+	in.PRCycle = analyze.WindowPRCycle(in.PRCycle, m)
 	// retention (weeks-since-adoption) and landing (window aggregate) are not
 	// calendar-windowed here.
-	m := cfg.Windows.DisplayMonths
-	for i := range focus {
-		focus[i].Weeks = analyze.WindowWeeks(focus[i].Weeks, m)
-		focus[i].Cycles = analyze.WindowCycles(focus[i].Cycles, m)
-		focus[i].RepoAdoption = analyze.WindowRepoAdoption(focus[i].RepoAdoption, m)
-		focus[i].WIP = analyze.WindowWIP(focus[i].WIP, m)
-		focus[i].Defects = analyze.WindowDefects(focus[i].Defects, m)
-		focus[i].BugFix = analyze.WindowBugFix(focus[i].BugFix, m)
-		focus[i].PRCycle = analyze.WindowPRCycle(focus[i].PRCycle, m)
+	for i := range in.Focus {
+		in.Focus[i].Weeks = analyze.WindowWeeks(in.Focus[i].Weeks, m)
+		in.Focus[i].Cycles = analyze.WindowCycles(in.Focus[i].Cycles, m)
+		in.Focus[i].RepoAdoption = analyze.WindowRepoAdoption(in.Focus[i].RepoAdoption, m)
+		in.Focus[i].WIP = analyze.WindowWIP(in.Focus[i].WIP, m)
+		in.Focus[i].Defects = analyze.WindowDefects(in.Focus[i].Defects, m)
+		in.Focus[i].BugFix = analyze.WindowBugFix(in.Focus[i].BugFix, m)
+		in.Focus[i].PRCycle = analyze.WindowPRCycle(in.Focus[i].PRCycle, m)
 	}
 
 	if err := copyEmbeddedAssets(filepath.Join(deckDir, "assets")); err != nil {
 		return err
 	}
 
-	payload, err := BuildChartPayload(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, prcycle, retention, teamLanding, repoLanding, focus)
+	payload, err := BuildChartPayload(weeks, cutover, in.Cycles, in.RepoAdoption, in.WIP, in.Defects, in.BugFix, in.PRCycle, in.Retention, in.TeamLanding, in.RepoLanding, in.Focus)
 	if err != nil {
 		return fmt.Errorf("build chart payload: %w", err)
 	}
 
-	if err := RenderStaticCharts(weeks, cutover, cycles, repoAdoption, wip, defects, bugfix, prcycle, filepath.Join(deckDir, "charts")); err != nil {
+	if err := RenderStaticCharts(weeks, cutover, in.Cycles, in.RepoAdoption, in.WIP, in.Defects, in.BugFix, in.PRCycle, filepath.Join(deckDir, "charts")); err != nil {
 		return fmt.Errorf("render static charts: %w", err)
 	}
 
-	data := buildDeckData(cfg, weeks, cutover, cycles, repoAdoption, reportDate)
-	populateDefectSummary(&data, defects, cutover)
+	data := buildDeckData(cfg, weeks, cutover, in.Cycles, in.RepoAdoption, reportDate)
+	populateDefectSummary(&data, in.Defects, cutover)
 	populateProductivitySummary(&data, weeks, cutover)
-	populateBugFixSummary(&data, bugfix, cutover)
-	populatePRSummary(&data, prcycle, cutover)
-	populateRetentionSummary(&data, retention)
+	populateBugFixSummary(&data, in.BugFix, cutover)
+	populatePRSummary(&data, in.PRCycle, cutover)
+	populateRetentionSummary(&data, in.Retention)
 	// Significance + scorecard run last: they read BugFixHasCutover set above
 	// and operate on the same windowed cohorts the headlines use.
-	populateSignificance(&data, weeks, defects, bugfix, cycles, cutover)
-	data.Tools = tools.Tools
-	data.ToolsAvailable = len(tools.Tools) > 0
-	data.ToolsCommitsTotal = tools.DistinctCommits
+	populateSignificance(&data, weeks, in.Defects, in.BugFix, in.Cycles, cutover)
+	data.Tools = in.Tools.Tools
+	data.ToolsAvailable = len(in.Tools.Tools) > 0
+	data.ToolsCommitsTotal = in.Tools.DistinctCommits
 	data.Charts = payload
 	tmpl, err := template.New("deck").Parse(deckTemplate)
 	if err != nil {
@@ -588,8 +578,10 @@ func buildDeckData(
 		CyclesAvailable:       len(cycles) > 0,
 		RepoAdoptionAvailable: len(repoAdoption) > 0,
 	}
-	if n := len(repoAdoption); n > 0 {
-		last := repoAdoption[n-1]
+	// Direct len() in the condition — nilaway can't see the guard through
+	// an intermediate `n := len(...)` binding.
+	if len(repoAdoption) > 0 {
+		last := repoAdoption[len(repoAdoption)-1]
 		d.RepoAdoptionAdopted = last.AIEnabled
 		d.RepoAdoptionTotal = last.AIEnabled + last.Active + last.Inactive
 	}

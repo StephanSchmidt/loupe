@@ -12,10 +12,10 @@ import (
 )
 
 // renderDeck calls RenderDeck with only the commit-side inputs; the
-// tracker/PR/retention/landing/focus slides get nil, mirroring buildPayload
-// in charts_test.go.
+// tracker/PR/retention/landing/focus slides stay empty, mirroring
+// buildPayload in charts_test.go.
 func renderDeck(dir string, cfg *config.Config, weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, tools analyze.ToolBreakdownStats, reportDate time.Time) error {
-	return RenderDeck(dir, cfg, weeks, cutover, cycles, nil, nil, nil, nil, nil, nil, nil, nil, nil, tools, reportDate)
+	return RenderDeck(dir, cfg, weeks, cutover, Inputs{Cycles: cycles, Tools: tools}, reportDate)
 }
 
 func TestRenderDeck_ProducesAllArtifacts(t *testing.T) {

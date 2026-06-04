@@ -116,108 +116,124 @@ func (l *live) Stop() {
 	<-l.done
 }
 
+// runState is the mutable state of the run loop, threaded through apply and
+// render.
+type runState struct {
+	active               map[string]*repoState
+	total, doneRepos     int
+	totalCommits, totPRs int
+	frame, prevLive      int
+	pending              []string // permanent lines to flush this render
+}
+
 func (l *live) run() {
 	defer close(l.done)
 	ticker := time.NewTicker(tickInterval)
 	defer ticker.Stop()
 
-	active := map[string]*repoState{}
-	var (
-		total, doneRepos     int
-		totalCommits, totPRs int
-		frame, prevLive      int
-		pending              []string // permanent lines to flush this render
-	)
-
-	render := func() {
-		// Include in-flight repos' running counts so the totals tick up
-		// while a big repo streams, instead of only jumping on completion.
-		liveCommits, livePRs := totalCommits, totPRs
-		for _, rs := range active {
-			liveCommits += rs.commits
-			livePRs += rs.prs
-		}
-		live := l.liveBlock(active, frame, doneRepos, total, liveCommits, livePRs)
-		// Move up over the previous live block and clear to end of screen,
-		// then print the freshly-completed permanent lines (they become
-		// scrollback) followed by the new live block.
-		var b strings.Builder
-		if prevLive > 0 {
-			fmt.Fprintf(&b, "\033[%dA", prevLive)
-		}
-		b.WriteString("\033[0J")
-		for _, ln := range pending {
-			b.WriteString(l.truncate(ln))
-			b.WriteByte('\n')
-		}
-		for _, ln := range live {
-			b.WriteString(ln)
-			b.WriteByte('\n')
-		}
-		_, _ = io.WriteString(l.w, b.String())
-		prevLive = len(live)
-		pending = nil
-	}
-
+	st := &runState{active: map[string]*repoState{}}
 	for {
 		select {
 		case e := <-l.events:
-			switch e.kind {
-			case evStop:
-				// Clear the live block; leave only the permanent lines.
-				if prevLive > 0 {
-					_, _ = fmt.Fprintf(l.w, "\033[%dA\033[0J", prevLive)
-				}
-				for _, ln := range pending {
-					_, _ = io.WriteString(l.w, l.truncate(ln)+"\n")
-				}
+			if e.kind == evStop {
+				l.finish(st)
 				return
-			case evListing:
-				pending = append(pending, styleDim.Render("  Listing repositories in "+e.ws+"…"))
-			case evFound:
-				total += e.count
-				line := fmt.Sprintf("  %s: %d repositories found", e.ws, e.count)
-				if e.wsSize > e.count {
-					line += styleBackoff.Render(fmt.Sprintf(" (%d hidden — credential lacks read access)", e.wsSize-e.count))
-				}
-				pending = append(pending, line)
-			case evStart:
-				if _, ok := active[e.name]; !ok {
-					active[e.name] = &repoState{name: e.name}
-				}
-			case evProgress:
-				rs := active[e.name]
-				if rs == nil {
-					rs = &repoState{name: e.name}
-					active[e.name] = rs
-				}
-				if e.commits >= 0 {
-					rs.commits = e.commits
-				}
-				if e.prs >= 0 {
-					rs.prs = e.prs
-				}
-			case evBackoff:
-				rs := active[e.name]
-				if rs == nil {
-					rs = &repoState{name: e.name}
-					active[e.name] = rs
-				}
-				rs.backoffUntil = time.Now().Add(e.delay)
-				rs.backoffAttempt = e.attempt
-			case evDone:
-				delete(active, e.name)
-				doneRepos++
-				totalCommits += e.commits
-				totPRs += e.prs
-				pending = append(pending, styleDone.Render(
-					fmt.Sprintf("  ✓ %s: %d commits, %d PRs", e.name, e.commits, e.prs)))
 			}
-			render()
+			l.apply(e, st)
+			l.render(st)
 		case <-ticker.C:
-			frame++
-			render()
+			st.frame++
+			l.render(st)
 		}
+	}
+}
+
+// apply folds one event into the run state.
+func (l *live) apply(e event, st *runState) {
+	switch e.kind {
+	case evListing:
+		st.pending = append(st.pending, styleDim.Render("  Listing repositories in "+e.ws+"…"))
+	case evFound:
+		st.total += e.count
+		line := fmt.Sprintf("  %s: %d repositories found", e.ws, e.count)
+		if e.wsSize > e.count {
+			line += styleBackoff.Render(fmt.Sprintf(" (%d hidden — credential lacks read access)", e.wsSize-e.count))
+		}
+		st.pending = append(st.pending, line)
+	case evStart:
+		if _, ok := st.active[e.name]; !ok {
+			st.active[e.name] = &repoState{name: e.name}
+		}
+	case evProgress:
+		rs := st.repo(e.name)
+		if e.commits >= 0 {
+			rs.commits = e.commits
+		}
+		if e.prs >= 0 {
+			rs.prs = e.prs
+		}
+	case evBackoff:
+		rs := st.repo(e.name)
+		rs.backoffUntil = time.Now().Add(e.delay)
+		rs.backoffAttempt = e.attempt
+	case evDone:
+		delete(st.active, e.name)
+		st.doneRepos++
+		st.totalCommits += e.commits
+		st.totPRs += e.prs
+		st.pending = append(st.pending, styleDone.Render(
+			fmt.Sprintf("  ✓ %s: %d commits, %d PRs", e.name, e.commits, e.prs)))
+	}
+}
+
+// repo returns the active entry for name, creating it if missing.
+func (st *runState) repo(name string) *repoState {
+	rs := st.active[name]
+	if rs == nil {
+		rs = &repoState{name: name}
+		st.active[name] = rs
+	}
+	return rs
+}
+
+// render redraws the live block and flushes any pending permanent lines.
+func (l *live) render(st *runState) {
+	// Include in-flight repos' running counts so the totals tick up
+	// while a big repo streams, instead of only jumping on completion.
+	liveCommits, livePRs := st.totalCommits, st.totPRs
+	for _, rs := range st.active {
+		liveCommits += rs.commits
+		livePRs += rs.prs
+	}
+	live := l.liveBlock(st.active, st.frame, st.doneRepos, st.total, liveCommits, livePRs)
+	// Move up over the previous live block and clear to end of screen,
+	// then print the freshly-completed permanent lines (they become
+	// scrollback) followed by the new live block.
+	var b strings.Builder
+	if st.prevLive > 0 {
+		fmt.Fprintf(&b, "\033[%dA", st.prevLive)
+	}
+	b.WriteString("\033[0J")
+	for _, ln := range st.pending {
+		b.WriteString(l.truncate(ln))
+		b.WriteByte('\n')
+	}
+	for _, ln := range live {
+		b.WriteString(ln)
+		b.WriteByte('\n')
+	}
+	_, _ = io.WriteString(l.w, b.String())
+	st.prevLive = len(live)
+	st.pending = nil
+}
+
+// finish clears the live block on evStop, leaving only the permanent lines.
+func (l *live) finish(st *runState) {
+	if st.prevLive > 0 {
+		_, _ = fmt.Fprintf(l.w, "\033[%dA\033[0J", st.prevLive)
+	}
+	for _, ln := range st.pending {
+		_, _ = io.WriteString(l.w, l.truncate(ln)+"\n")
 	}
 }
 
@@ -242,6 +258,11 @@ func (l *live) liveBlock(active map[string]*repoState, frame, done, total, commi
 	}
 	for _, n := range shown {
 		rs := active[n]
+		if rs == nil {
+			// names was built from active's own keys; the guard is for
+			// nilaway's flow analysis, which can't model that round trip.
+			continue
+		}
 		if rs.backoffUntil.After(now) {
 			wait := rs.backoffUntil.Sub(now).Round(time.Second)
 			lines = append(lines, styleBackoff.Render(
