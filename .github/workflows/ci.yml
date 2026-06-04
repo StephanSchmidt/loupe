@@ -35,7 +35,14 @@ jobs:
       - run: go vet ./...
       - run: go tool staticcheck ./...
       - run: go tool golangci-lint run ./...
+      # nilaway's whole-program analysis peaks above the runner's RAM and
+      # gets OOM-killed ("signal: killed") without these: GOMEMLIMIT keeps
+      # the Go runtime GC-ing below the kill threshold, GOGC=50 trades CPU
+      # for a lower peak.
       - run: go tool nilaway ./...
+        env:
+          GOGC: "50"
+          GOMEMLIMIT: 12GiB
       - run: go tool gocyclo -over 15 .
 
   security:
