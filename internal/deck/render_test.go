@@ -11,6 +11,13 @@ import (
 	"github.com/StephanSchmidt/loupe/internal/config"
 )
 
+// renderDeck calls RenderDeck with only the commit-side inputs; the
+// tracker/PR/retention/landing/focus slides get nil, mirroring buildPayload
+// in charts_test.go.
+func renderDeck(dir string, cfg *config.Config, weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle, tools analyze.ToolBreakdownStats, reportDate time.Time) error {
+	return RenderDeck(dir, cfg, weeks, cutover, cycles, nil, nil, nil, nil, nil, nil, nil, nil, nil, tools, reportDate)
+}
+
 func TestRenderDeck_ProducesAllArtifacts(t *testing.T) {
 	cfg := &config.Config{
 		Org:     "acme-eng",
@@ -21,7 +28,7 @@ func TestRenderDeck_ProducesAllArtifacts(t *testing.T) {
 	reportDate := time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC)
 
 	dir := t.TempDir()
-	if err := RenderDeck(dir, cfg, weeks, cutover, nil, analyze.ToolBreakdownStats{}, reportDate); err != nil {
+	if err := renderDeck(dir, cfg, weeks, cutover, nil, analyze.ToolBreakdownStats{}, reportDate); err != nil {
 		t.Fatalf("RenderDeck: %v", err)
 	}
 
@@ -93,7 +100,7 @@ func TestRenderDeck_IncludesCycleSlideWhenCyclesPresent(t *testing.T) {
 	reportDate := time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC)
 
 	dir := t.TempDir()
-	if err := RenderDeck(dir, cfg, weeks, cutover, cycles, analyze.ToolBreakdownStats{}, reportDate); err != nil {
+	if err := renderDeck(dir, cfg, weeks, cutover, cycles, analyze.ToolBreakdownStats{}, reportDate); err != nil {
 		t.Fatalf("RenderDeck: %v", err)
 	}
 
@@ -104,9 +111,9 @@ func TestRenderDeck_IncludesCycleSlideWhenCyclesPresent(t *testing.T) {
 	body := string(html)
 	for _, want := range []string{
 		`id="cycle-chart"`,
-		"Cycle time",
-		"Idea → Dev",
-		"Dev → Release",
+		"Lead time",
+		"Wait (Create → dev start)",
+		"Cycle (dev start → last commit)",
 	} {
 		if !strings.Contains(body, want) {
 			t.Errorf("expected %q on rendered deck", want)
@@ -135,7 +142,7 @@ func TestRenderDeck_NoCutoverDetected(t *testing.T) {
 	reportDate := time.Date(2026, 5, 13, 0, 0, 0, 0, time.UTC)
 
 	dir := t.TempDir()
-	if err := RenderDeck(dir, cfg, weeks, cutover, nil, analyze.ToolBreakdownStats{}, reportDate); err != nil {
+	if err := renderDeck(dir, cfg, weeks, cutover, nil, analyze.ToolBreakdownStats{}, reportDate); err != nil {
 		t.Fatalf("RenderDeck: %v", err)
 	}
 	html, err := os.ReadFile(filepath.Join(dir, "index.html"))

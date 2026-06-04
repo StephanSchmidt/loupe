@@ -33,6 +33,13 @@ func sampleCutover(weeks []analyze.WeekStats) analyze.Cutover {
 	}
 }
 
+// buildPayload calls BuildChartPayload with only the commit-side inputs;
+// the tracker/PR/retention/landing/focus slides get nil and are exercised
+// through their own chart builders.
+func buildPayload(weeks []analyze.WeekStats, cutover analyze.Cutover, cycles []analyze.WeekCycle) (ChartPayload, error) {
+	return BuildChartPayload(weeks, cutover, cycles, nil, nil, nil, nil, nil, nil, nil, nil, nil)
+}
+
 // decodeOption parses the option blob back into a generic map for shape
 // assertions. Tests inspect a few load-bearing fields rather than the full
 // ECharts schema, which is too broad and changes upstream.
@@ -49,7 +56,7 @@ func TestBuildChartPayload_ThroughputShape(t *testing.T) {
 	weeks := sampleWeeks()
 	cutover := sampleCutover(weeks)
 
-	got, err := BuildChartPayload(weeks, cutover, nil)
+	got, err := buildPayload(weeks, cutover, nil)
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
@@ -98,23 +105,29 @@ func TestBuildChartPayload_AdoptionShape(t *testing.T) {
 	weeks := sampleWeeks()
 	cutover := sampleCutover(weeks)
 
-	got, err := BuildChartPayload(weeks, cutover, nil)
+	got, err := buildPayload(weeks, cutover, nil)
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
 
 	opt := decodeOption(t, string(got.AdoptionJSON))
 
+	// Without medium-confidence AI commits the chart stacks two bars:
+	// AI-tagged (bottom, anchored at 0) and Human (top).
 	series, _ := opt["series"].([]any)
-	if len(series) != 1 {
-		t.Fatalf("adoption series len = %d, want 1", len(series))
+	if len(series) != 2 {
+		t.Fatalf("adoption series len = %d, want 2", len(series))
 	}
-	s0, _ := series[0].(map[string]any)
-	if s0["type"] != "line" {
-		t.Errorf("adoption series type = %v, want line", s0["type"])
+	ai, _ := series[0].(map[string]any)
+	if ai["name"] != "AI-tagged" || ai["type"] != "bar" || ai["stack"] != "total" {
+		t.Errorf("AI series misconfigured: %+v", ai)
 	}
-	if _, hasMark := s0["markLine"]; hasMark {
-		t.Errorf("adoption series carries markLine; expected overlay-only: %+v", s0)
+	human, _ := series[1].(map[string]any)
+	if human["name"] != "Human" || human["stack"] != "total" {
+		t.Errorf("human series misconfigured: %+v", human)
+	}
+	if _, hasMark := ai["markLine"]; hasMark {
+		t.Errorf("adoption series carries markLine; expected overlay-only: %+v", ai)
 	}
 	if got.AdoptionCutoverIdx != 6 {
 		t.Errorf("AdoptionCutoverIdx = %d, want 6", got.AdoptionCutoverIdx)
@@ -128,7 +141,7 @@ func TestBuildChartPayload_AdoptionShape(t *testing.T) {
 
 func TestBuildChartPayload_NoCutoverSignalsAbsence(t *testing.T) {
 	weeks := sampleWeeks()
-	got, err := BuildChartPayload(weeks, analyze.Cutover{Detected: false}, nil)
+	got, err := buildPayload(weeks, analyze.Cutover{Detected: false}, nil)
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
@@ -144,7 +157,7 @@ func TestBuildChartPayload_NoCutoverSignalsAbsence(t *testing.T) {
 }
 
 func TestBuildChartPayload_NoData(t *testing.T) {
-	if _, err := BuildChartPayload(nil, analyze.Cutover{}, nil); err == nil {
+	if _, err := buildPayload(nil, analyze.Cutover{}, nil); err == nil {
 		t.Errorf("expected error for empty weeks, got nil")
 	}
 }
@@ -173,7 +186,7 @@ func TestBuildChartPayload_CycleShape(t *testing.T) {
 	cutover := sampleCutover(weeks)
 	cycles := sampleCycles()
 
-	got, err := BuildChartPayload(weeks, cutover, cycles)
+	got, err := buildPayload(weeks, cutover, cycles)
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
@@ -189,17 +202,17 @@ func TestBuildChartPayload_CycleShape(t *testing.T) {
 	if len(series) != 2 {
 		t.Fatalf("expected 2 stacked cycle series (Dev→Release, Idea→Dev), got %d", len(series))
 	}
-	if !strings.Contains(string(got.CycleJSON), "Idea") {
-		t.Errorf("CycleJSON missing 'Idea': %s", got.CycleJSON)
+	if !strings.Contains(string(got.CycleJSON), "Wait (Create → dev start)") {
+		t.Errorf("CycleJSON missing wait series: %s", got.CycleJSON)
 	}
-	if !strings.Contains(string(got.CycleJSON), "Release") {
-		t.Errorf("CycleJSON missing 'Release': %s", got.CycleJSON)
+	if !strings.Contains(string(got.CycleJSON), "Cycle (dev start → last commit)") {
+		t.Errorf("CycleJSON missing cycle series: %s", got.CycleJSON)
 	}
 }
 
 func TestBuildChartPayload_NoCycleWhenNil(t *testing.T) {
 	weeks := sampleWeeks()
-	got, err := BuildChartPayload(weeks, sampleCutover(weeks), nil)
+	got, err := buildPayload(weeks, sampleCutover(weeks), nil)
 	if err != nil {
 		t.Fatalf("BuildChartPayload: %v", err)
 	}
