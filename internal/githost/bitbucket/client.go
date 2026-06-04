@@ -462,11 +462,23 @@ func prFromWire(raw prWire) githost.PullRequest {
 	if raw.MergeCommit != nil {
 		pr.MergeCommitSHA = raw.MergeCommit.Hash
 	}
-	if raw.ClosedOn != nil {
+	// Bitbucket's PR *list* response omits closed_on, so closing/merge time has
+	// to come from updated_on — on a terminal PR (merged/declined/superseded)
+	// the record is immutable, so its last update is the close/merge moment.
+	// Prefer closed_on when present (PR-detail fetches), else updated_on.
+	var closed *time.Time
+	switch {
+	case raw.ClosedOn != nil:
 		t := raw.ClosedOn.UTC()
-		pr.ClosedAt = &t
+		closed = &t
+	case raw.State == "MERGED" || raw.State == "DECLINED" || raw.State == "SUPERSEDED":
+		t := raw.UpdatedOn.UTC()
+		closed = &t
+	}
+	if closed != nil {
+		pr.ClosedAt = closed
 		if raw.State == "MERGED" {
-			pr.MergedAt = &t
+			pr.MergedAt = closed
 		}
 	}
 	// Bitbucket only exposes the raw "Name <email>" string. If no email
