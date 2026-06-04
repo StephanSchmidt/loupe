@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/StephanSchmidt/loupe/internal/apiclient"
@@ -221,20 +222,35 @@ func (c *Client) ListProjects(ctx context.Context) ([]tracker.Project, error) {
 
 // --- ListIssues ---
 
+// jqlQuoteString wraps s in double quotes and escapes backslashes and
+// double-quotes per JQL string-literal rules. Always quote interpolated
+// values: a quoted literal is valid for ordinary keys ("ENG") AND for
+// reserved words ("IN", "AND", "OR", "NOT", "EMPTY", "NULL", "WAS",
+// "IS", "ON", "DURING", "BEFORE", "AFTER", "BY", "FROM", "TO") that the
+// JQL parser would otherwise treat as operators. A Jira project keyed
+// "IN" would fail `project = IN` with a 400 "Expecting either a value,
+// list or function but got 'IN'" — quoting is the documented fix.
+func jqlQuoteString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
+}
+
 // ListIssues streams issues for projectKey updated after since (zero means
 // full history). Uses Jira Cloud's `/rest/api/3/search/jql` endpoint with
 // cursor pagination via nextPageToken.
 func (c *Client) ListIssues(ctx context.Context, projectKey string, since time.Time) iter.Seq2[tracker.Issue, error] {
 	return func(yield func(tracker.Issue, error) bool) {
-		jql := fmt.Sprintf("project = %s ORDER BY updated DESC", projectKey)
+		jql := fmt.Sprintf("project = %s ORDER BY updated DESC", jqlQuoteString(projectKey))
 		if !since.IsZero() {
 			tz, err := c.resolveTimezone(ctx)
 			if err != nil {
 				yield(tracker.Issue{}, fmt.Errorf("resolve jira timezone: %w", err))
 				return
 			}
-			jql = fmt.Sprintf(`project = %s AND updated >= "%s" ORDER BY updated DESC`,
-				projectKey, since.In(tz).Format("2006-01-02 15:04"))
+			jql = fmt.Sprintf(`project = %s AND updated >= %s ORDER BY updated DESC`,
+				jqlQuoteString(projectKey),
+				jqlQuoteString(since.In(tz).Format("2006-01-02 15:04")))
 		}
 
 		const maxPages = 10000 // pagelen 100 × 10k = 1M issues, far above any real project
